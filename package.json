@@ -16,6 +16,7 @@
   },
   "scripts": {
     "build": "bun build src/index.ts --outdir dist --target bun --format esm && tsc --emitDeclarationOnly",
+    "install:plugin": "bun run build && cp dist/index.js package.json ~/.cache/opencode/node_modules/open-krode/",
     "clean": "rm -rf dist",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
