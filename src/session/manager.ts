@@ -13,12 +13,13 @@ export class SessionManager {
     this.configuredPort = opts?.port;
   }
 
-  async startSession(): Promise<{ sessionId: SessionId; url: string }> {
+  async startSession(kubectlContext?: string): Promise<{ sessionId: SessionId; url: string }> {
     const sessionId = `krode_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
 
     const session: KrodeSession = {
       id: sessionId,
       port: 0,
+      kubectlContext,
       views: new Map(),
       ws: null,
       watchers: new Map(),

@@ -54,16 +54,31 @@ export interface RGDGraph {
   edges: GraphEdge[];
 }
 
+export type LiveState =
+  | "alive"
+  | "reconciling"
+  | "pending"
+  | "not-found"
+  | "error"
+  | "unknown"
+  | "ok"
+  | "meta";
+
 export interface GraphNode {
   id: string;
   label: string;
   kind: "root" | "resource" | "state" | "schema-field";
-  resourceKind?: string; // K8s kind of the managed resource
+  resourceKind?: string; // K8s kind of the managed resource (e.g. "ConfigMap")
   isConditional: boolean;
   isStateNode: boolean;
   isForEach: boolean;
   celExpressions: string[];
   readyWhen: string[];
+  // Live instance overlay (populated by buildNodeLiveStates)
+  exists?: boolean;       // false = includeWhen blocked; render as dashed/faded outline
+  detail?: string;        // short hover tooltip line (e.g. "HP: 45 · forEach item 2/3")
+  liveState?: LiveState;
+  liveConditions?: RGDCondition[];
 }
 
 export interface GraphEdge {
@@ -71,6 +86,7 @@ export interface GraphEdge {
   to: string;
   label: string | undefined;
   conditional: boolean;
+  dashed?: boolean;       // true = conditional / includeWhen edge
 }
 
 export interface InstanceSummary {
@@ -110,4 +126,5 @@ export interface ChildResource {
   namespace: string;
   status?: string;
   rawYaml?: string;
+  conditions?: RGDCondition[];
 }

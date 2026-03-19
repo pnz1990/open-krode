@@ -21,6 +21,8 @@ export interface View {
 export interface KrodeSession {
   id: SessionId;
   port: number;
+  // kubectl context detected (or supplied) when session was opened
+  kubectlContext?: string;
   views: Map<ViewId, View>;
   ws: WebSocket | null;
   // watch interval ids
@@ -32,13 +34,15 @@ export type ServerMessage =
   | { type: "view.open"; view: ViewSnapshot }
   | { type: "view.update"; viewId: ViewId; data: Record<string, unknown> }
   | { type: "view.close"; viewId: ViewId }
+  | { type: "node.yaml"; nodeId: string; yaml: string; kubectlCmd: string }
   | { type: "ping" };
 
 // WebSocket messages: browser → server
 export type ClientMessage =
   | { type: "connected" }
   | { type: "pong" }
-  | { type: "view.request"; viewId: ViewId; action: string; payload?: Record<string, unknown> };
+  | { type: "view.request"; viewId: ViewId; action: string; payload?: Record<string, unknown> }
+  | { type: "node.inspect"; viewId: ViewId; nodeId: string; kind: string; name: string; namespace: string; kubectlContext?: string };
 
 export interface ViewSnapshot {
   id: ViewId;

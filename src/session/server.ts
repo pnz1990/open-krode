@@ -1,5 +1,8 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { Server, ServerWebSocket } from "bun";
 import { getHtmlBundle } from "@/ui/bundle";
+import { getResourceYaml } from "@/kro";
 import type { KrodeSession, SessionId } from "./types";
 
 interface WsData {
@@ -9,13 +12,30 @@ interface WsData {
 const HTTP_NOT_FOUND = 404;
 const HTTP_BAD_REQUEST = 400;
 
+// Resolve the path to dist/ui.html relative to this file's location.
+// import.meta.dir is Bun-specific; fall back to import.meta.url for Node.js compatibility.
+const _metaDir: string =
+  (import.meta as { dir?: string }).dir ??
+  (() => {
+    const { fileURLToPath } = require("node:url") as { fileURLToPath: (u: string) => string };
+    return join(fileURLToPath(import.meta.url), "..");
+  })();
+const UI_HTML_PATH = join(_metaDir, "ui.html");
+
+function serveHtml(): string {
+  try {
+    return readFileSync(UI_HTML_PATH, "utf-8");
+  } catch {
+    // Fallback: generate in-process (happens when ui.html hasn't been written yet)
+    return getHtmlBundle();
+  }
+}
+
 export async function createSessionServer(
   sessionId: SessionId,
   session: KrodeSession,
   configuredPort?: number,
 ): Promise<{ server: Server<WsData>; port: number }> {
-  const htmlBundle = getHtmlBundle();
-
   const server = Bun.serve<WsData>({
     port: configuredPort ?? 0,
 
@@ -29,7 +49,8 @@ export async function createSessionServer(
       }
 
       if (url.pathname === "/" || url.pathname === "/index.html") {
-        return new Response(htmlBundle, {
+        // Read from disk on every request — allows UI updates without restarting OpenCode
+        return new Response(serveHtml(), {
           headers: { "Content-Type": "text/html; charset=utf-8" },
         });
       }
@@ -56,11 +77,46 @@ export async function createSessionServer(
         session.ws = null;
       },
 
-      message(_ws: ServerWebSocket<WsData>, msg: string | Buffer) {
+      message(ws: ServerWebSocket<WsData>, msg: string | Buffer) {
         try {
           const parsed = JSON.parse(msg.toString()) as { type?: string };
-          if (parsed.type === "pong") return; // keepalive
-          // Future: handle view.request actions
+          if (parsed.type === "pong") return;
+
+          if (parsed.type === "node.inspect") {
+            const req = parsed as {
+              type: "node.inspect";
+              nodeId: string;
+              kind: string;
+              name: string;
+              namespace: string;
+              kubectlContext?: string;
+            };
+
+            const context = req.kubectlContext ?? session.kubectlContext;
+            const kubectlCmd = `kubectl get ${req.kind} ${req.name} -n ${req.namespace} -o yaml${context ? ` --context ${context}` : ""}`;
+
+            getResourceYaml(req.namespace, req.kind, req.name, context)
+              .then((yaml) => {
+                ws.send(
+                  JSON.stringify({
+                    type: "node.yaml",
+                    nodeId: req.nodeId,
+                    yaml,
+                    kubectlCmd,
+                  }),
+                );
+              })
+              .catch(() => {
+                ws.send(
+                  JSON.stringify({
+                    type: "node.yaml",
+                    nodeId: req.nodeId,
+                    yaml: "",
+                    kubectlCmd,
+                  }),
+                );
+              });
+          }
         } catch {
           // ignore malformed messages
         }

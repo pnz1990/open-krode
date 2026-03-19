@@ -1,8 +1,12 @@
 // Self-contained browser UI bundle for open-krode
 // Served as a single HTML page; communicates with the plugin via WebSocket.
 
+import { BUILD_TIME } from "@/build-stamp";
+
+const VERSION = "0.2.0";
+
 export function getHtmlBundle(): string {
-  return /* html */ `<!DOCTYPE html>
+  const html = /* html */ `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
@@ -12,25 +16,44 @@ export function getHtmlBundle(): string {
 /* ── reset & tokens ─────────────────────────────────────────────────── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 :root {
-  --bg: #0d1117;
-  --bg2: #161b22;
-  --bg3: #21262d;
+  --bg:     #0d1117;
+  --bg2:    #161b22;
+  --bg3:    #21262d;
   --border: #30363d;
-  --text: #e6edf3;
-  --text2: #8b949e;
+  --text:   #e6edf3;
+  --text2:  #8b949e;
   --accent: #58a6ff;
-  --green: #3fb950;
-  --red: #f85149;
+  --green:  #3fb950;
+  --red:    #f85149;
   --yellow: #d29922;
   --purple: #bc8cff;
-  --cyan: #39d353;
+  --cyan:   #39d353;
   --orange: #ffa657;
-  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", monospace;
+  --font:   -apple-system, BlinkMacSystemFont, "Segoe UI", monospace;
+  /* live state colors */
+  --alive:        #3fb950;
+  --alive-bg:     #0d2010;
+  --reconciling:  #58a6ff;
+  --reconciling-bg: #0d1a30;
+  --pending:      #d29922;
+  --pending-bg:   #1f1600;
+  --notfound:     #30363d;
+  --notfound-bg:  #0d1117;
+  --error:        #f85149;
+  --error-bg:     #200d0d;
+  --ok:           #2a6496;
+  --ok-bg:        #0a1420;
+  --meta:         #bc8cff;
+  --meta-bg:      #1a0d33;
+  --root:         #58a6ff;
+  --root-bg:      #0d1f40;
+  --state-node:   #bc8cff;
+  --state-bg:     #150d2a;
 }
 html, body { height: 100%; background: var(--bg); color: var(--text); font-family: var(--font); font-size: 13px; }
 
 /* ── layout ─────────────────────────────────────────────────────────── */
-#app { display: grid; grid-template-rows: 48px 1fr; grid-template-columns: 280px 1fr; height: 100vh; }
+#app { display: grid; grid-template-rows: 48px 1fr; grid-template-columns: 260px 1fr; height: 100vh; }
 #topbar { grid-column: 1 / -1; background: var(--bg2); border-bottom: 1px solid var(--border);
   display: flex; align-items: center; padding: 0 16px; gap: 12px; }
 #sidebar { background: var(--bg2); border-right: 1px solid var(--border); overflow-y: auto;
@@ -76,98 +99,146 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
 .rgd-card-name { font-weight: 600; font-size: 13px; margin-bottom: 4px; }
 .rgd-card-kind { font-size: 11px; color: var(--accent); margin-bottom: 8px; }
 .rgd-card-meta { font-size: 11px; color: var(--text2); display: flex; gap: 12px; }
-.rgd-card-condition { width: 8px; height: 8px; border-radius: 50%; }
 
 /* ── dag panel ─────────────────────────────────────────────────────── */
-#dag-toolbar { display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+#dag-toolbar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; flex-wrap: wrap;
   background: var(--bg2); border-bottom: 1px solid var(--border); flex-shrink: 0; }
 .dag-title { font-weight: 600; font-size: 13px; }
-.dag-badge { font-size: 10px; padding: 2px 7px; border-radius: 10px; font-weight: 600; }
-.badge-root { background: #1f3a5f; color: var(--accent); }
-.badge-resource { background: #1a3828; color: var(--green); }
-.badge-state { background: #2d1f4f; color: var(--purple); }
-.badge-cond { background: #3a2a0a; color: var(--yellow); }
-.badge-foreach { background: #1f3050; color: var(--cyan); }
+#dag-legend { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.legend-item { display: flex; align-items: center; gap: 4px; font-size: 10px; color: var(--text2); }
+.legend-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.legend-dashed { width: 14px; height: 0; border-top: 2px dashed var(--notfound); flex-shrink: 0; }
+#dag-wrap { display: flex; flex: 1; overflow: hidden; }
 #dag-svg-wrap { flex: 1; overflow: auto; background: var(--bg); }
 #dag-svg { display: block; }
-#detail-panel { width: 340px; border-left: 1px solid var(--border); background: var(--bg2);
-  display: flex; flex-direction: column; overflow: hidden; flex-shrink: 0; }
+
+/* ── detail panel (right side of DAG) ───────────────────────────────── */
+#detail-panel { width: 380px; border-left: 1px solid var(--border); background: var(--bg2);
+  display: flex; flex-direction: column; overflow: hidden; flex-shrink: 0; transition: width 0.2s; }
 #detail-panel.hidden { display: none; }
 .detail-header { padding: 10px 12px; font-weight: 600; font-size: 12px; border-bottom: 1px solid var(--border);
-  display: flex; align-items: center; gap: 8px; }
-.detail-close { margin-left: auto; cursor: pointer; color: var(--text2); font-size: 16px; }
+  display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.detail-close { margin-left: auto; cursor: pointer; color: var(--text2); font-size: 16px; line-height: 1; }
 .detail-close:hover { color: var(--text); }
 .detail-body { flex: 1; overflow-y: auto; padding: 12px; }
 .detail-section { margin-bottom: 14px; }
 .detail-section-title { font-size: 10px; text-transform: uppercase; letter-spacing: 1px;
   color: var(--text2); margin-bottom: 6px; }
 .cel-chip { background: var(--bg3); border: 1px solid var(--border); border-radius: 4px;
-  padding: 4px 8px; font-family: monospace; font-size: 11px; color: var(--orange); margin-bottom: 4px;
-  word-break: break-all; }
-.dag-row { display: flex; }
+  padding: 5px 8px; font-family: monospace; font-size: 11px; color: var(--orange); margin-bottom: 4px;
+  word-break: break-all; cursor: pointer; transition: border-color 0.1s; }
+.cel-chip:hover { border-color: var(--orange); }
+.kubectl-cmd { background: var(--bg3); border: 1px solid var(--border); border-radius: 4px;
+  padding: 6px 10px; font-family: monospace; font-size: 11px; color: var(--accent); margin-bottom: 10px;
+  word-break: break-all; cursor: pointer; }
+.kubectl-cmd:hover { border-color: var(--accent); }
+.yaml-inspect { font-family: monospace; font-size: 11px; line-height: 1.6; white-space: pre;
+  color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
+  padding: 10px; overflow-x: auto; }
+.inspect-loading { color: var(--text2); font-size: 12px; font-style: italic; padding: 8px 0; }
+
+/* ── live state tags ─────────────────────────────────────────────────── */
+.state-tag { font-size: 10px; padding: 2px 7px; border-radius: 10px; font-weight: 600; display: inline-block; }
+.state-alive        { background: var(--alive-bg);       color: var(--alive); }
+.state-reconciling  { background: var(--reconciling-bg); color: var(--reconciling); }
+.state-pending      { background: var(--pending-bg);     color: var(--pending); }
+.state-not-found    { background: var(--notfound-bg);    color: var(--notfound); }
+.state-error        { background: var(--error-bg);       color: var(--error); }
+.state-ok           { background: var(--ok-bg);          color: var(--ok); }
+.state-meta         { background: var(--meta-bg);        color: var(--meta); }
+.state-unknown      { background: var(--bg3);            color: var(--text2); }
+
+/* ── tag strip ───────────────────────────────────────────────────────── */
+.tag { font-size: 10px; padding: 1px 6px; border-radius: 3px; font-weight: 600; display: inline-block; }
+.tag-root     { background: var(--root-bg);    color: var(--root); }
+.tag-resource { background: var(--alive-bg);   color: var(--alive); }
+.tag-state    { background: var(--state-bg);   color: var(--state-node); }
+.tag-cond     { background: var(--pending-bg); color: var(--pending); }
+.tag-foreach  { background: #001a20;           color: var(--cyan); }
+
+/* ── reconciling banner ──────────────────────────────────────────────── */
+@keyframes kro-blink { 0%,100%{opacity:1} 50%{opacity:0.25} }
+.reconciling-banner { display: flex; align-items: center; gap: 8px; padding: 6px 14px;
+  background: #0d1a30; border-bottom: 1px solid var(--reconciling);
+  font-size: 11px; color: var(--reconciling); flex-shrink: 0; }
+.reconciling-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--reconciling);
+  animation: kro-blink 0.8s step-end infinite; }
+
+/* ── pulse animation (SVG nodes use this class on their glow rect) ──── */
+@keyframes kro-pulse { 0%,100%{opacity:0.15} 50%{opacity:0.55} }
 
 /* ── instance panel ─────────────────────────────────────────────────── */
-.instance-layout { display: flex; flex: 1; overflow: hidden; }
-.instance-left { flex: 1; overflow-y: auto; padding: 16px; }
-.instance-right { width: 320px; border-left: 1px solid var(--border); overflow-y: auto; padding: 12px; }
-.section-title { font-size: 11px; text-transform: uppercase; letter-spacing: 1px;
+#instance-panel { display: flex; flex-direction: column; overflow: hidden; }
+.instance-dag-wrap { flex-shrink: 0; border-bottom: 1px solid var(--border);
+  overflow-x: auto; background: var(--bg); max-height: 360px; }
+.instance-body { display: flex; flex: 1; overflow: hidden; }
+.instance-left { flex: 1; overflow-y: auto; padding: 14px 16px; }
+.instance-right { width: 300px; border-left: 1px solid var(--border); overflow-y: auto; padding: 12px; }
+.section-title { font-size: 10px; text-transform: uppercase; letter-spacing: 1px;
   color: var(--text2); margin-bottom: 8px; padding-bottom: 4px; border-bottom: 1px solid var(--border); }
-.kv-grid { display: grid; grid-template-columns: 140px 1fr; gap: 2px 8px; font-size: 12px; }
+.kv-grid { display: grid; grid-template-columns: 140px 1fr; gap: 2px 8px; font-size: 12px; margin-bottom: 6px; }
 .kv-key { color: var(--text2); font-family: monospace; }
 .kv-val { color: var(--text); font-family: monospace; word-break: break-all; }
 .condition-row { display: flex; align-items: center; gap: 8px; padding: 4px 0; }
 .cond-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-.cond-true { background: var(--green); }
-.cond-false { background: var(--red); }
+.cond-true    { background: var(--green); }
+.cond-false   { background: var(--red); }
 .cond-unknown { background: var(--text2); }
-.cond-label { font-size: 12px; }
+.cond-label  { font-size: 12px; }
 .cond-reason { font-size: 11px; color: var(--text2); }
 .event-row { padding: 6px 0; border-bottom: 1px solid var(--border); }
 .event-row:last-child { border-bottom: none; }
 .event-type { font-size: 10px; font-weight: 700; padding: 1px 5px; border-radius: 3px; }
-.event-normal { background: #1a3828; color: var(--green); }
+.event-normal  { background: #1a3828; color: var(--green); }
 .event-warning { background: #3a1a0a; color: var(--orange); }
 .event-reason { font-size: 11px; color: var(--accent); margin: 3px 0 2px; font-family: monospace; }
-.event-msg { font-size: 11px; color: var(--text); word-break: break-word; }
+.event-msg  { font-size: 11px; color: var(--text); word-break: break-word; }
 .event-meta { font-size: 10px; color: var(--text2); margin-top: 2px; }
-.refresh-bar { display: flex; align-items: center; gap: 6px; padding: 6px 12px;
-  background: var(--bg2); border-bottom: 1px solid var(--border); font-size: 11px; color: var(--text2); }
-.pulse { animation: pulse 1.5s ease-in-out infinite; }
-@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+.refresh-bar { display: flex; align-items: center; gap: 6px; padding: 5px 12px;
+  background: var(--bg2); border-bottom: 1px solid var(--border); font-size: 11px; color: var(--text2);
+  flex-shrink: 0; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.spin { display: inline-block; animation: spin 1s linear infinite; }
+
+/* ── child resource rows ─────────────────────────────────────────────── */
+.child-resource-row { display: flex; align-items: center; gap: 8px; padding: 4px 0;
+  border-bottom: 1px solid var(--border); }
+.child-resource-row:last-child { border-bottom: none; }
+.child-kind-badge { font-size: 10px; padding: 1px 6px; border-radius: 3px;
+  background: var(--bg3); color: var(--accent); font-family: monospace; flex-shrink: 0; }
+.child-name { font-size: 11px; font-family: monospace; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.child-status { font-size: 10px; padding: 1px 5px; border-radius: 3px; flex-shrink: 0; }
+.csr-ready   { background: var(--alive-bg);  color: var(--alive); }
+.csr-unknown { background: var(--bg3);       color: var(--text2); }
+.csr-other   { background: #3a1a0a;          color: var(--orange); }
+
+/* ── events panel ───────────────────────────────────────────────────── */
+#events-panel { overflow: hidden; }
+#events-body { flex: 1; overflow-y: auto; padding: 12px 16px; }
 
 /* ── yaml panel ─────────────────────────────────────────────────────── */
 #yaml-panel { flex: 1; overflow: auto; }
 .yaml-wrap { padding: 16px; font-family: monospace; font-size: 12px; line-height: 1.6;
   white-space: pre; color: var(--text); }
-.yaml-key { color: var(--accent); }
+.yaml-key    { color: var(--accent); }
 .yaml-string { color: var(--green); }
 .yaml-number { color: var(--orange); }
-.yaml-bool { color: var(--purple); }
-.yaml-null { color: var(--text2); }
-.yaml-comment { color: var(--text2); font-style: italic; }
+.yaml-bool   { color: var(--purple); }
+.yaml-null   { color: var(--text2); }
+.yaml-comment{ color: var(--text2); font-style: italic; }
 
-/* ── DAG node styles ─────────────────────────────────────────────────── */
+/* ── DAG SVG node/edge styles ────────────────────────────────────────── */
 .dag-node { cursor: pointer; }
-.dag-node:hover rect { stroke-width: 2.5; }
-.dag-edge { fill: none; stroke: var(--border); stroke-width: 1.5; }
-.dag-edge.conditional { stroke-dasharray: 6 3; stroke: var(--yellow); }
-.dag-edge.foreach { stroke: var(--cyan); }
-.dag-edge.state { stroke: var(--purple); stroke-dasharray: 4 2; }
-.dag-edge-label { fill: var(--text2); font-size: 9px; font-family: var(--font); }
+.dag-node:hover .node-bg { stroke-width: 2.5 !important; }
+.dag-edge { fill: none; stroke-width: 1.5; }
 
 /* ── empty state ─────────────────────────────────────────────────────── */
 .empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center;
   height: 100%; color: var(--text2); gap: 8px; }
 .empty-icon { font-size: 48px; opacity: 0.4; }
 .empty-msg { font-size: 14px; }
-.empty-sub { font-size: 12px; opacity: 0.7; }
-
-/* ── misc ─────────────────────────────────────────────────────────────── */
-.tag { font-size: 10px; padding: 1px 6px; border-radius: 3px; font-weight: 600; }
-.tag-root { background: #1f3a5f; color: var(--accent); }
-.tag-resource { background: #1a3828; color: var(--green); }
-.tag-state { background: #2d1f4f; color: var(--purple); }
-pre { overflow-x: auto; }
+.empty-sub  { font-size: 12px; opacity: 0.7; }
 </style>
 </head>
 <body>
@@ -176,6 +247,7 @@ pre { overflow-x: auto; }
   <div id="topbar">
     <div class="logo">open-krode <span>/ kro explorer</span></div>
     <div class="ctx-badge" id="ctx-badge">connecting…</div>
+    <div style="font-size:10px;color:var(--text2);white-space:nowrap;flex-shrink:0">__VERSION_STAMP__</div>
     <div class="ml-auto" style="display:flex;align-items:center;gap:8px;">
       <span id="status-label" style="font-size:11px;color:var(--text2)">connecting</span>
       <div class="status-dot" id="status-dot"></div>
@@ -193,6 +265,7 @@ pre { overflow-x: auto; }
   <!-- MAIN -->
   <div id="main">
     <div id="view-container">
+
       <!-- HOME -->
       <div class="panel visible" id="home-panel">
         <div class="home-title">kro Resource Graph Definitions</div>
@@ -204,13 +277,21 @@ pre { overflow-x: auto; }
       <div class="panel" id="dag-panel">
         <div id="dag-toolbar">
           <span class="dag-title" id="dag-title">RGD Graph</span>
-          <span class="dag-badge badge-root">root</span>
-          <span class="dag-badge badge-resource">resource</span>
-          <span class="dag-badge badge-state">specPatch</span>
-          <span class="dag-badge badge-cond">includeWhen</span>
-          <span class="dag-badge badge-foreach">forEach</span>
+          <div id="dag-reconciling" style="display:none" class="reconciling-banner" style="padding:3px 8px;border-radius:4px;font-size:11px;">
+            <div class="reconciling-dot"></div><span>reconciling</span>
+          </div>
+          <div style="flex:1"></div>
+          <div id="dag-legend">
+            <span class="legend-item"><span class="legend-dot" style="background:var(--root)"></span>root CR</span>
+            <span class="legend-item"><span class="legend-dot" style="background:var(--alive)"></span>alive</span>
+            <span class="legend-item"><span class="legend-dot" style="background:var(--reconciling)"></span>reconciling</span>
+            <span class="legend-item"><span class="legend-dot" style="background:var(--pending)"></span>pending</span>
+            <span class="legend-item"><span class="legend-dashed"></span>locked</span>
+            <span class="legend-item"><span class="legend-dot" style="background:var(--state-node)"></span>specPatch</span>
+            <span class="legend-item"><span class="legend-dot" style="background:var(--error)"></span>error</span>
+          </div>
         </div>
-        <div class="dag-row" style="flex:1;overflow:hidden;">
+        <div id="dag-wrap">
           <div id="dag-svg-wrap">
             <svg id="dag-svg" xmlns="http://www.w3.org/2000/svg"></svg>
           </div>
@@ -227,11 +308,20 @@ pre { overflow-x: auto; }
       <!-- INSTANCE VIEW -->
       <div class="panel" id="instance-panel">
         <div class="refresh-bar">
-          <span class="pulse" id="refresh-pulse">⟳</span>
+          <span class="spin" id="refresh-spin" style="display:none">⟳</span>
           <span id="refresh-label">Watching…</span>
-          <span style="margin-left:auto;" id="refresh-time"></span>
+          <span style="margin-left:auto;font-size:10px;" id="refresh-time"></span>
         </div>
-        <div class="instance-layout">
+        <div id="instance-reconciling" class="reconciling-banner" style="display:none">
+          <div class="reconciling-dot"></div>
+          <span>kro is reconciling this instance</span>
+          <span style="margin-left:auto;font-size:10px;opacity:0.7">nodes pulsing = actively updating</span>
+        </div>
+        <!-- DAG embedded in instance view -->
+        <div class="instance-dag-wrap" id="instance-dag-wrap">
+          <svg id="instance-dag-svg" xmlns="http://www.w3.org/2000/svg" style="display:block"></svg>
+        </div>
+        <div class="instance-body">
           <div class="instance-left" id="instance-left"></div>
           <div class="instance-right" id="instance-right"></div>
         </div>
@@ -239,15 +329,16 @@ pre { overflow-x: auto; }
 
       <!-- EVENTS VIEW -->
       <div class="panel" id="events-panel">
-        <div style="padding:12px 16px;font-weight:600;border-bottom:1px solid var(--border);" id="events-title">Events</div>
-        <div style="flex:1;overflow-y:auto;padding:12px 16px;" id="events-body"></div>
+        <div style="padding:10px 16px;font-weight:600;font-size:13px;border-bottom:1px solid var(--border);flex-shrink:0" id="events-title">Events</div>
+        <div id="events-body"></div>
       </div>
 
       <!-- YAML VIEW -->
       <div class="panel" id="yaml-panel-wrap">
-        <div style="padding:8px 12px;font-size:11px;color:var(--text2);border-bottom:1px solid var(--border);" id="yaml-header"></div>
+        <div style="padding:8px 12px;font-size:11px;color:var(--text2);border-bottom:1px solid var(--border);flex-shrink:0" id="yaml-header"></div>
         <div id="yaml-panel"><div class="yaml-wrap" id="yaml-body"></div></div>
       </div>
+
     </div>
   </div>
 </div>
@@ -256,9 +347,14 @@ pre { overflow-x: auto; }
 // ════════════════════════════════════════════════════════════════════════
 // State
 // ════════════════════════════════════════════════════════════════════════
-const views = new Map();   // viewId → view
+const views = new Map();
 let activeViewId = null;
 let ws = null;
+// Current view+node for which we're waiting for a node.yaml response
+let pendingInspect = null;
+// Pulse animation frame ticker
+let pulseFrame = 0;
+let pulseTimer = null;
 
 // ════════════════════════════════════════════════════════════════════════
 // WebSocket
@@ -275,7 +371,7 @@ function connect() {
     setTimeout(connect, 2000);
   };
   ws.onmessage = (e) => {
-    try { handleMessage(JSON.parse(e.data)); } catch {}
+    try { handleMessage(JSON.parse(e.data)); } catch(err) { console.error('WS parse error', err); }
   };
 }
 
@@ -286,26 +382,55 @@ function setStatus(connected) {
 
 function handleMessage(msg) {
   if (msg.type === 'ping') { ws.send(JSON.stringify({ type: 'pong' })); return; }
+
   if (msg.type === 'view.open') {
     views.set(msg.view.id, msg.view);
     renderSidebar();
     if (!activeViewId) activateView(msg.view.id);
-    renderActiveView();
+    else renderActiveView();
+    return;
   }
   if (msg.type === 'view.update') {
     const v = views.get(msg.viewId);
     if (v) { v.data = msg.data; }
     renderSidebar();
     if (activeViewId === msg.viewId) renderActiveView();
+    return;
   }
   if (msg.type === 'view.close') {
     views.delete(msg.viewId);
     if (activeViewId === msg.viewId) {
       const remaining = [...views.keys()];
-      activateView(remaining[0] || null);
+      activateView(remaining[remaining.length - 1] || null);
     }
     renderSidebar();
     renderActiveView();
+    return;
+  }
+  if (msg.type === 'node.yaml') {
+    handleNodeYaml(msg);
+    return;
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// Pulse ticker (for reconciling animation)
+// ════════════════════════════════════════════════════════════════════════
+function startPulse() {
+  if (pulseTimer) return;
+  pulseTimer = setInterval(() => {
+    pulseFrame = (pulseFrame + 1) % 60;
+    // Re-render pulse rects in all visible SVGs
+    updatePulseRects();
+  }, 100);
+}
+function stopPulse() {
+  if (pulseTimer) { clearInterval(pulseTimer); pulseTimer = null; }
+}
+function updatePulseRects() {
+  const opacity = 0.15 + Math.abs(Math.sin(pulseFrame * Math.PI / 30)) * 0.45;
+  for (const el of document.querySelectorAll('.pulse-rect')) {
+    el.setAttribute('opacity', opacity);
   }
 }
 
@@ -379,8 +504,11 @@ function renderActiveView() {
     return;
   }
   if (v.mode === 'rgd-graph') {
-    renderDag(v.data);
+    renderDagView(v.data, 'dag-svg', false);
     document.getElementById('dag-panel').classList.add('visible');
+    // Show/hide reconciling banner
+    const recBanner = document.getElementById('dag-reconciling');
+    recBanner.style.display = v.data.reconciling ? 'flex' : 'none';
     return;
   }
   if (v.mode === 'instance-graph') {
@@ -408,7 +536,7 @@ function renderHome(data) {
     document.getElementById('ctx-badge').textContent = data.currentContext;
   }
   const grid = document.getElementById('rgd-grid');
-  const rgds = data && data.rgds || [];
+  const rgds = (data && data.rgds) || [];
   if (rgds.length === 0) {
     grid.innerHTML = '<div style="color:var(--text2);font-style:italic;">No RGDs found in cluster.</div>';
     return;
@@ -424,289 +552,600 @@ function renderHome(data) {
       '<div class="rgd-card-meta">' +
         '<span>📦 ' + r.resourceCount + ' resources</span>' +
         '<span>⏱ ' + r.age + '</span>' +
-        '<span class="rgd-card-condition" style="background:' + (healthy ? 'var(--green)' : 'var(--yellow)') + '"></span>' +
+        '<span style="width:8px;height:8px;border-radius:50%;background:' + (healthy ? 'var(--green)' : 'var(--yellow)') + ';display:inline-block"></span>' +
       '</div>';
     grid.appendChild(card);
   }
 }
 
 // ════════════════════════════════════════════════════════════════════════
-// DAG view
+// DAG layout & rendering
 // ════════════════════════════════════════════════════════════════════════
-const NODE_W = 160;
-const NODE_H = 40;
-const H_GAP = 40;
-const V_GAP = 60;
+const NODE_W = 124;
+const NODE_H = 44;
+const H_GAP  = 28;   // gap between nodes in same row
+const V_GAP  = 72;   // vertical gap between rows
 
-function renderDag(data) {
+// Compute per-node color based on liveState (instance mode) or graph kind (RGD mode)
+function nodeColors(n, nodeStates) {
+  const live = nodeStates && nodeStates[n.id];
+  if (live) {
+    switch (live) {
+      case 'alive':       return { border: 'var(--alive)',       bg: 'var(--alive-bg)',       text: 'var(--alive)' };
+      case 'reconciling': return { border: 'var(--reconciling)', bg: 'var(--reconciling-bg)', text: 'var(--reconciling)' };
+      case 'pending':     return { border: 'var(--pending)',     bg: 'var(--pending-bg)',     text: 'var(--pending)' };
+      case 'not-found':   return { border: 'var(--notfound)',    bg: 'var(--notfound-bg)',    text: 'var(--text2)' };
+      case 'error':       return { border: 'var(--error)',       bg: 'var(--error-bg)',       text: 'var(--error)' };
+      case 'ok':          return { border: 'var(--ok)',          bg: 'var(--ok-bg)',          text: '#5dade2' };
+      case 'meta':        return { border: 'var(--meta)',        bg: 'var(--meta-bg)',        text: 'var(--meta)' };
+    }
+  }
+  // Static RGD-only coloring by node type
+  if (n.kind === 'root')    return { border: 'var(--root)',       bg: 'var(--root-bg)',    text: 'var(--root)' };
+  if (n.isStateNode)        return { border: 'var(--state-node)', bg: 'var(--state-bg)',   text: 'var(--state-node)' };
+  if (n.isConditional)      return { border: 'var(--pending)',    bg: 'var(--pending-bg)', text: 'var(--pending)' };
+  if (n.isForEach)          return { border: 'var(--cyan)',       bg: '#001a20',           text: 'var(--cyan)' };
+  return { border: '#2a4a6a', bg: '#0a1420', text: 'var(--text)' };
+}
+
+function nodeIcon(n, liveState) {
+  const live = liveState;
+  if (live === 'reconciling') return '⟳';
+  if (live === 'not-found')   return '○';
+  if (live === 'error')       return '✕';
+  if (n.kind === 'root')   return '⬡';
+  if (n.isStateNode)       return '◈';
+  if (n.isForEach)         return '∀';
+  if (n.isConditional)     return '?';
+  return '▪';
+}
+
+function renderDagView(data, svgId, isInstance) {
   if (!data || !data.graph) {
-    document.getElementById('dag-svg').innerHTML = '';
+    const svg = document.getElementById(svgId);
+    if (svg) svg.innerHTML = '';
     return;
   }
-  const { graph, rgdName } = data;
-  document.getElementById('dag-title').textContent = rgdName || 'RGD Graph';
+  const { graph, rgdName, nodeStates, reconciling } = data;
+
+  // Update title (only for main DAG panel)
+  if (svgId === 'dag-svg') {
+    document.getElementById('dag-title').textContent = rgdName || 'RGD Graph';
+  }
 
   const { nodes, edges } = graph;
+  const nodeMap = new Map(nodes.map(n => [n.id, n]));
+  const ns = nodeStates || {};
 
-  // Layout: BFS rows
-  const rowOf = {};
-  const queue = [];
-  const roots = nodes.filter(n => n.kind === 'root');
-  for (const r of roots) { rowOf[r.id] = 0; queue.push(r.id); }
-  
-  const children = {};
+  // ── BFS layout ──────────────────────────────────────────────────────
+  // Build adjacency list from edges
+  const childrenOf = {};
   for (const e of edges) {
-    if (!children[e.from]) children[e.from] = [];
-    children[e.from].push(e.to);
+    if (!childrenOf[e.from]) childrenOf[e.from] = [];
+    childrenOf[e.from].push(e.to);
   }
-  
-  const visited = new Set(roots.map(r => r.id));
+
+  // BFS to determine depth
+  const depthOf = {};
+  const queue = [];
+  for (const n of nodes) {
+    if (n.kind === 'root') { depthOf[n.id] = 0; queue.push(n.id); }
+  }
+  const visited = new Set(Object.keys(depthOf));
   while (queue.length) {
     const id = queue.shift();
-    const row = rowOf[id] || 0;
-    for (const child of (children[id] || [])) {
+    const d = depthOf[id] || 0;
+    for (const child of (childrenOf[id] || [])) {
       if (!visited.has(child)) {
         visited.add(child);
-        rowOf[child] = row + 1;
+        depthOf[child] = d + 1;
         queue.push(child);
       }
     }
   }
-  // any unvisited nodes go to row 1
-  for (const n of nodes) if (rowOf[n.id] === undefined) rowOf[n.id] = 1;
+  // Unvisited nodes (no edges back to root) go at depth 1
+  for (const n of nodes) if (depthOf[n.id] === undefined) depthOf[n.id] = 1;
 
-  // Group by row
-  const rows = {};
+  // Group by depth
+  const byDepth = {};
   for (const n of nodes) {
-    const r = rowOf[n.id];
-    if (!rows[r]) rows[r] = [];
-    rows[r].push(n);
+    const d = depthOf[n.id];
+    if (!byDepth[d]) byDepth[d] = [];
+    byDepth[d].push(n);
   }
 
-  // Assign x/y
-  const pos = {};
-  const maxRow = Math.max(...Object.keys(rows).map(Number));
-  const maxCols = Math.max(...Object.values(rows).map(a => a.length));
-  const svgW = Math.max(maxCols * (NODE_W + H_GAP) + H_GAP, 600);
-  const svgH = (maxRow + 1) * (NODE_H + V_GAP) + V_GAP;
+  // Sort within each depth: root first, state nodes last, conditional in middle
+  for (const row of Object.values(byDepth)) {
+    row.sort((a, b) => {
+      const rankA = a.kind === 'root' ? 0 : a.isStateNode ? 3 : a.isConditional ? 2 : 1;
+      const rankB = b.kind === 'root' ? 0 : b.isStateNode ? 3 : b.isConditional ? 2 : 1;
+      return rankA - rankB;
+    });
+  }
 
-  for (const [rowStr, rowNodes] of Object.entries(rows)) {
-    const row = Number(rowStr);
-    const colW = NODE_W + H_GAP;
-    const totalW = rowNodes.length * colW - H_GAP;
-    const startX = (svgW - totalW) / 2;
-    rowNodes.forEach((n, i) => {
+  // Assign x/y positions
+  const pos = {};
+  const maxDepth = Math.max(...Object.keys(byDepth).map(Number));
+  // Find widest row to determine canvas width
+  let maxRowW = 0;
+  for (const row of Object.values(byDepth)) {
+    const w = row.length * (NODE_W + H_GAP) - H_GAP;
+    if (w > maxRowW) maxRowW = w;
+  }
+  const svgW = Math.max(maxRowW + H_GAP * 2, 500);
+
+  for (const [dStr, row] of Object.entries(byDepth)) {
+    const d = Number(dStr);
+    const rowW = row.length * (NODE_W + H_GAP) - H_GAP;
+    const startX = (svgW - rowW) / 2;
+    row.forEach((n, i) => {
       pos[n.id] = {
-        x: startX + i * colW,
-        y: V_GAP / 2 + row * (NODE_H + V_GAP),
+        x: startX + i * (NODE_W + H_GAP),
+        y: H_GAP / 2 + d * (NODE_H + V_GAP),
       };
     });
   }
 
-  const svg = document.getElementById('dag-svg');
+  const svgH = (maxDepth + 1) * (NODE_H + V_GAP) + H_GAP;
+
+  const svg = document.getElementById(svgId);
   svg.setAttribute('width', svgW);
   svg.setAttribute('height', svgH);
   svg.setAttribute('viewBox', '0 0 ' + svgW + ' ' + svgH);
   svg.innerHTML = '';
 
-  // Draw edges first
+  // ── Arrow markers ───────────────────────────────────────────────────
+  const defs = svgEl('defs');
+  defs.innerHTML =
+    '<marker id="arr-' + svgId + '" markerWidth="7" markerHeight="7" refX="3.5" refY="7" orient="auto">' +
+      '<path d="M0,0 L7,0 L3.5,7 z" fill="#2a4a6a"/></marker>' +
+    '<marker id="arr-active-' + svgId + '" markerWidth="7" markerHeight="7" refX="3.5" refY="7" orient="auto">' +
+      '<path d="M0,0 L7,0 L3.5,7 z" fill="#58a6ff"/></marker>' +
+    '<marker id="arr-dashed-' + svgId + '" markerWidth="7" markerHeight="7" refX="3.5" refY="7" orient="auto">' +
+      '<path d="M0,0 L7,0 L3.5,7 z" fill="#444"/></marker>';
+  svg.appendChild(defs);
+
+  // ── Draw edges ──────────────────────────────────────────────────────
   const edgeGroup = svgEl('g');
   for (const e of edges) {
-    const from = pos[e.from];
-    const to = pos[e.to];
-    if (!from || !to) continue;
-    const x1 = from.x + NODE_W / 2;
-    const y1 = from.y + NODE_H;
-    const x2 = to.x + NODE_W / 2;
-    const y2 = to.y;
-    const mid = (y1 + y2) / 2;
+    const fp = pos[e.from];
+    const tp = pos[e.to];
+    if (!fp || !tp) continue;
+
+    const fromNode = nodeMap.get(e.from);
+    const toNode   = nodeMap.get(e.to);
+    const fromLive = ns[e.from];
+    const toLive   = ns[e.to];
+    const isActive = reconciling && (fromLive === 'reconciling' || toLive === 'reconciling');
+    const isDashed = e.dashed || e.conditional;
+    const toExists = (toNode && toNode.exists !== false) && (toLive !== 'not-found');
+
+    const x1 = fp.x + NODE_W / 2;
+    const y1 = fp.y + NODE_H;
+    const x2 = tp.x + NODE_W / 2;
+    const y2 = tp.y;
+    const my = (y1 + y2) / 2;
+    const pathD = 'M' + x1 + ',' + y1 + ' C' + x1 + ',' + my + ' ' + x2 + ',' + my + ' ' + x2 + ',' + y2;
+
+    const stroke = isActive ? '#58a6ff' : isDashed ? '#333' : '#1e3a5f';
+    const markerId = isActive ? ('arr-active-' + svgId) : isDashed ? ('arr-dashed-' + svgId) : ('arr-' + svgId);
+
     const path = svgEl('path');
-    path.setAttribute('d', 'M' + x1 + ',' + y1 + ' C' + x1 + ',' + mid + ' ' + x2 + ',' + mid + ' ' + x2 + ',' + y2);
-    let cls = 'dag-edge';
-    if (e.label === 'specPatch') cls += ' state';
-    else if (e.label === 'forEach') cls += ' foreach';
-    else if (e.conditional) cls += ' conditional';
-    path.setAttribute('class', cls);
+    path.setAttribute('d', pathD);
+    path.setAttribute('fill', 'none');
+    path.setAttribute('stroke', stroke);
+    path.setAttribute('stroke-width', isActive ? '2' : '1.5');
+    if (isDashed) path.setAttribute('stroke-dasharray', '5,3');
+    path.setAttribute('opacity', toExists ? '1' : '0.25');
+    path.setAttribute('marker-end', 'url(#' + markerId + ')');
     edgeGroup.appendChild(path);
-    if (e.label && e.label !== 'specPatch') {
-      const lx = (x1 + x2) / 2;
-      const ly = mid - 4;
+
+    // Edge label
+    if (e.label) {
+      const lx = (x1 + x2) / 2 + 4;
+      const ly = my - 4;
       const lbl = svgEl('text');
-      lbl.setAttribute('x', lx); lbl.setAttribute('y', ly);
+      lbl.setAttribute('x', lx);
+      lbl.setAttribute('y', ly);
       lbl.setAttribute('text-anchor', 'middle');
-      lbl.setAttribute('class', 'dag-edge-label');
-      lbl.textContent = e.label;
+      lbl.setAttribute('font-size', '9');
+      lbl.setAttribute('fill', isActive ? '#58a6ff' : isDashed ? '#555' : '#2a4a6a');
+      lbl.setAttribute('font-family', 'var(--font)');
+      for (const [li, line] of e.label.split('\\n').entries()) {
+        const ts = svgEl('tspan');
+        ts.setAttribute('x', lx);
+        ts.setAttribute('dy', li === 0 ? '0' : '10');
+        ts.textContent = line;
+        lbl.appendChild(ts);
+      }
       edgeGroup.appendChild(lbl);
     }
   }
   svg.appendChild(edgeGroup);
 
-  // Draw nodes
+  // ── Draw nodes ──────────────────────────────────────────────────────
   const nodeGroup = svgEl('g');
   for (const n of nodes) {
     const p = pos[n.id];
     if (!p) continue;
+
+    const live = ns[n.id];
+    const colors = nodeColors(n, ns);
+    const icon = nodeIcon(n, live);
+    const isLocked = live === 'not-found' || n.exists === false;
+    const isPulsing = live === 'reconciling' && reconciling;
+
     const g = svgEl('g');
     g.setAttribute('class', 'dag-node');
     g.setAttribute('transform', 'translate(' + p.x + ',' + p.y + ')');
-    g.dataset.nodeId = n.id;
+    g.setAttribute('data-node-id', n.id);
 
-    const { fill, stroke, textColor } = nodeColors(n);
+    // Pulse glow rect (behind the node)
+    if (isPulsing) {
+      const glow = svgEl('rect');
+      glow.setAttribute('class', 'pulse-rect');
+      glow.setAttribute('x', '-4');
+      glow.setAttribute('y', '-4');
+      glow.setAttribute('width', NODE_W + 8);
+      glow.setAttribute('height', NODE_H + 8);
+      glow.setAttribute('rx', '8');
+      glow.setAttribute('fill', colors.border);
+      glow.setAttribute('opacity', '0.15');
+      g.appendChild(glow);
+    }
+
+    // Background rect
     const rect = svgEl('rect');
+    rect.setAttribute('class', 'node-bg');
     rect.setAttribute('width', NODE_W);
     rect.setAttribute('height', NODE_H);
-    rect.setAttribute('rx', 6);
-    rect.setAttribute('fill', fill);
-    rect.setAttribute('stroke', stroke);
+    rect.setAttribute('rx', '5');
+    rect.setAttribute('fill', colors.bg);
+    rect.setAttribute('stroke', colors.border);
     rect.setAttribute('stroke-width', '1.5');
+    if (isLocked) {
+      rect.setAttribute('stroke-dasharray', '4,2');
+      rect.setAttribute('opacity', '0.4');
+    }
     g.appendChild(rect);
 
-    // Icon
-    const icon = nodeIcon(n);
+    // Kind label (small, top center)
+    const kindLbl = svgEl('text');
+    kindLbl.setAttribute('x', NODE_W / 2);
+    kindLbl.setAttribute('y', '12');
+    kindLbl.setAttribute('text-anchor', 'middle');
+    kindLbl.setAttribute('font-size', '8');
+    kindLbl.setAttribute('font-family', 'var(--font)');
+    kindLbl.setAttribute('fill', isLocked ? '#333' : '#6e7681');
+    kindLbl.textContent = truncate(n.resourceKind || n.kind, 16);
+    g.appendChild(kindLbl);
+
+    // Main label (bold, center)
+    const mainLbl = svgEl('text');
+    mainLbl.setAttribute('x', '10');
+    mainLbl.setAttribute('y', '25');
+    mainLbl.setAttribute('font-size', '11');
+    mainLbl.setAttribute('font-weight', '600');
+    mainLbl.setAttribute('font-family', 'monospace');
+    mainLbl.setAttribute('fill', isLocked ? '#333' : colors.text);
+    mainLbl.textContent = truncate(n.label, 13);
+    g.appendChild(mainLbl);
+
+    // Icon (right of label)
     const iconEl = svgEl('text');
-    iconEl.setAttribute('x', 10);
-    iconEl.setAttribute('y', NODE_H / 2 + 4);
-    iconEl.setAttribute('font-size', '13');
+    iconEl.setAttribute('x', NODE_W - 14);
+    iconEl.setAttribute('y', '26');
+    iconEl.setAttribute('font-size', '11');
+    iconEl.setAttribute('fill', isLocked ? '#333' : colors.text);
     iconEl.textContent = icon;
     g.appendChild(iconEl);
 
-    const label = svgEl('text');
-    label.setAttribute('x', 26);
-    label.setAttribute('y', NODE_H / 2 - 3);
-    label.setAttribute('font-size', '11');
-    label.setAttribute('font-family', 'monospace');
-    label.setAttribute('fill', textColor);
-    label.textContent = truncate(n.label, 16);
-    g.appendChild(label);
-
-    if (n.resourceKind && n.resourceKind !== n.label) {
-      const sub = svgEl('text');
-      sub.setAttribute('x', 26);
-      sub.setAttribute('y', NODE_H / 2 + 10);
-      sub.setAttribute('font-size', '9');
-      sub.setAttribute('fill', '#8b949e');
-      sub.textContent = truncate(n.resourceKind, 18);
-      g.appendChild(sub);
+    // Locked label
+    if (isLocked) {
+      const lockedLbl = svgEl('text');
+      lockedLbl.setAttribute('x', NODE_W / 2);
+      lockedLbl.setAttribute('y', '38');
+      lockedLbl.setAttribute('text-anchor', 'middle');
+      lockedLbl.setAttribute('font-size', '8');
+      lockedLbl.setAttribute('fill', '#444');
+      lockedLbl.setAttribute('font-family', 'var(--font)');
+      lockedLbl.textContent = live === 'not-found' ? 'not found' : 'locked';
+      g.appendChild(lockedLbl);
+    } else {
+      // State dot (top right)
+      const dot = svgEl('circle');
+      dot.setAttribute('cx', NODE_W - 6);
+      dot.setAttribute('cy', '6');
+      dot.setAttribute('r', '3');
+      dot.setAttribute('fill', colors.border);
+      g.appendChild(dot);
     }
 
-    // Badges
-    let bx = NODE_W - 8;
-    if (n.isConditional) {
-      const b = badge('?', '#d29922', '#3a2a0a', bx - 14, 4);
-      g.appendChild(b); bx -= 18;
-    }
-    if (n.isForEach) {
-      const b = badge('∀', '#39d353', '#0d2416', bx - 14, 4);
-      g.appendChild(b); bx -= 18;
-    }
+    // Hover tooltip + click handler
+    const hasYaml = isInstance && !isLocked;
+    g.style.cursor = 'pointer';
+    g.addEventListener('mouseenter', () => showHoverTooltip(g, n, live, hasYaml, p));
+    g.addEventListener('mouseleave', () => removeHoverTooltip(svgId));
+    g.addEventListener('click', () => onNodeClick(n, live, data));
 
-    g.addEventListener('click', () => showNodeDetail(n));
     nodeGroup.appendChild(g);
   }
   svg.appendChild(nodeGroup);
+
+  // Start/stop pulse ticker based on reconciling state
+  if (reconciling) startPulse();
+  else stopPulse();
 }
 
-function nodeColors(n) {
-  if (n.kind === 'root')     return { fill: '#0d2040', stroke: '#58a6ff', textColor: '#58a6ff' };
-  if (n.isStateNode)          return { fill: '#1a0d33', stroke: '#bc8cff', textColor: '#bc8cff' };
-  if (n.isConditional)        return { fill: '#1f1400', stroke: '#d29922', textColor: '#d29922' };
-  if (n.isForEach)            return { fill: '#001a20', stroke: '#39d353', textColor: '#39d353' };
-  return { fill: '#0d1f0d', stroke: '#3fb950', textColor: '#e6edf3' };
+// ── Hover tooltip ──────────────────────────────────────────────────────
+let hoverTooltip = null;
+function removeHoverTooltip(svgId) {
+  const svg = document.getElementById(svgId);
+  const old = svg && svg.querySelector('.hover-tooltip');
+  if (old) old.remove();
 }
-function nodeIcon(n) {
-  if (n.kind === 'root') return '⬡';
-  if (n.isStateNode) return '⟳';
-  if (n.isForEach) return '∀';
-  if (n.isConditional) return '?';
-  return '▪';
+function showHoverTooltip(nodeG, n, live, hasYaml, pos) {
+  const svgEl2 = nodeG.ownerSVGElement;
+  if (!svgEl2) return;
+  const old = svgEl2.querySelector('.hover-tooltip');
+  if (old) old.remove();
+
+  const tx = pos.x + NODE_W / 2;
+  const ty = pos.y + NODE_H + 8;
+
+  const detail = n.detail || (n.resourceKind || n.kind);
+  const hint = hasYaml ? 'click → inspect YAML' : 'click → view CEL';
+
+  const g = svgEl('g');
+  g.setAttribute('class', 'hover-tooltip');
+  g.setAttribute('pointer-events', 'none');
+
+  const lines = [truncate(detail, 40), hint];
+  const boxW = 180;
+  const boxH = lines.length * 14 + 8;
+
+  const bg = svgEl('rect');
+  bg.setAttribute('x', tx - boxW / 2);
+  bg.setAttribute('y', ty);
+  bg.setAttribute('width', boxW);
+  bg.setAttribute('height', boxH);
+  bg.setAttribute('rx', '3');
+  bg.setAttribute('fill', '#0a0e1a');
+  bg.setAttribute('stroke', hasYaml ? '#58a6ff' : '#30363d');
+  bg.setAttribute('stroke-width', '1');
+  g.appendChild(bg);
+
+  lines.forEach((line, i) => {
+    const t = svgEl('text');
+    t.setAttribute('x', tx);
+    t.setAttribute('y', ty + 14 + i * 14);
+    t.setAttribute('text-anchor', 'middle');
+    t.setAttribute('font-size', '9');
+    t.setAttribute('font-family', 'var(--font)');
+    t.setAttribute('fill', i === 1 ? (hasYaml ? '#58a6ff' : '#8b949e') : '#ccc');
+    t.textContent = line;
+    g.appendChild(t);
+  });
+
+  svgEl2.appendChild(g);
 }
 
-function showNodeDetail(n) {
+// ── Node click handler ─────────────────────────────────────────────────
+function onNodeClick(n, live, viewData) {
+  const isInstance = !!(viewData && viewData.nodeStates);
+  if (isInstance && live !== 'not-found') {
+    // Instance mode: find actual K8s resource name and request YAML
+    const childResources = viewData.childResources || [];
+    const nodeKind = (n.resourceKind || n.label).toLowerCase();
+    let match = childResources.find(cr =>
+      cr.kind.toLowerCase() === nodeKind || cr.kind.toLowerCase() === nodeKind + 's'
+    );
+    // For root node, inspect the CR instance itself
+    if (!match && n.kind === 'root' && viewData.instance) {
+      match = {
+        kind: viewData.instance.kind,
+        name: viewData.instance.name,
+        namespace: viewData.instance.namespace,
+      };
+    }
+    if (match) {
+      requestNodeYaml(n, match, viewData);
+    } else {
+      showNodeDetailCEL(n);
+    }
+  } else {
+    // RGD-only mode: show CEL panel
+    showNodeDetailCEL(n);
+  }
+}
+
+function requestNodeYaml(n, resource, viewData) {
+  pendingInspect = n.id;
+  showDetailLoading(n.label, resource.kind + ' / ' + resource.name);
+  if (ws && ws.readyState === 1) {
+    ws.send(JSON.stringify({
+      type: 'node.inspect',
+      nodeId: n.id,
+      kind: resource.kind,
+      name: resource.name,
+      namespace: resource.namespace || viewData.namespace || 'default',
+      kubectlContext: viewData.kubectlContext,
+    }));
+  }
+}
+
+function handleNodeYaml(msg) {
+  const panel = document.getElementById('detail-panel');
+  panel.classList.remove('hidden');
+  document.getElementById('detail-title').textContent = msg.nodeId;
+  const body = document.getElementById('detail-body');
+  if (!msg.yaml) {
+    body.innerHTML = '<div class="inspect-loading">Resource not available or not found in cluster.</div>' +
+      (msg.kubectlCmd ? '<div class="kubectl-cmd" title="click to copy" onclick="navigator.clipboard&&navigator.clipboard.writeText(' + JSON.stringify(msg.kubectlCmd) + ')">' + esc(msg.kubectlCmd) + '</div>' : '');
+    return;
+  }
+  body.innerHTML =
+    '<div class="detail-section-title">kubectl command</div>' +
+    '<div class="kubectl-cmd" title="click to copy" onclick="navigator.clipboard&&navigator.clipboard.writeText(' + JSON.stringify(msg.kubectlCmd) + ')">' + esc(msg.kubectlCmd) + '</div>' +
+    '<div class="detail-section-title">YAML</div>' +
+    '<pre class="yaml-inspect">' + highlightYaml(msg.yaml) + '</pre>';
+  pendingInspect = null;
+}
+
+function showDetailLoading(label, subtitle) {
+  const panel = document.getElementById('detail-panel');
+  panel.classList.remove('hidden');
+  document.getElementById('detail-title').textContent = label;
+  document.getElementById('detail-body').innerHTML =
+    '<div class="inspect-loading">⟳ fetching ' + esc(subtitle) + ' from cluster…</div>';
+}
+
+// ─── CEL detail panel (RGD mode) ─────────────────────────────────────
+function showNodeDetailCEL(n) {
   const panel = document.getElementById('detail-panel');
   panel.classList.remove('hidden');
   document.getElementById('detail-title').textContent = n.label;
   const body = document.getElementById('detail-body');
-  const rows = [];
-  rows.push(detailSection('Kind', n.kind + (n.resourceKind && n.resourceKind !== n.label ? ' → ' + n.resourceKind : '')));
-  if (n.isConditional) rows.push(detailSection('includeWhen', 'conditional — only created when CEL is true'));
-  if (n.isStateNode) rows.push(detailSection('Type', 'specPatch (state node)'));
-  if (n.isForEach) rows.push(detailSection('Type', 'forEach fan-out'));
+  const parts = [];
+
+  // Kind
+  const kindLine = (n.kind || '') + (n.resourceKind && n.resourceKind !== n.label ? ' → ' + n.resourceKind : '');
+  parts.push(detailRow('Kind', kindLine));
+
+  // Type tags
+  const tags = [];
+  if (n.kind === 'root')     tags.push('<span class="tag tag-root">root CR</span>');
+  if (n.isStateNode)         tags.push('<span class="tag tag-state">specPatch</span>');
+  if (n.isConditional)       tags.push('<span class="tag tag-cond">includeWhen</span>');
+  if (n.isForEach)           tags.push('<span class="tag tag-foreach">forEach</span>');
+  if (!n.isStateNode && !n.isConditional && !n.isForEach && n.kind !== 'root')
+    tags.push('<span class="tag tag-resource">managed resource</span>');
+  if (tags.length) parts.push('<div class="detail-section"><div style="display:flex;gap:4px;flex-wrap:wrap">' + tags.join('') + '</div></div>');
+
+  // Detail hint
+  if (n.detail) parts.push(detailRow('Detail', n.detail));
+
+  // readyWhen
   if (n.readyWhen && n.readyWhen.length) {
-    rows.push('<div class="detail-section"><div class="detail-section-title">readyWhen</div>' +
-      n.readyWhen.map(e => '<div class="cel-chip">' + esc(e) + '</div>').join('') + '</div>');
+    parts.push('<div class="detail-section"><div class="detail-section-title">readyWhen — blocks downstream until true</div>' +
+      n.readyWhen.map(e => celChip(e)).join('') + '</div>');
   }
-  if (n.celExpressions && n.celExpressions.length) {
-    rows.push('<div class="detail-section"><div class="detail-section-title">CEL expressions</div>' +
-      n.celExpressions.slice(0, 6).map(e => '<div class="cel-chip">' + esc(e.slice(0, 120)) + (e.length > 120 ? '…' : '') + '</div>').join('') + '</div>');
+
+  // Other CEL expressions
+  const rwSet = new Set(n.readyWhen || []);
+  const otherCel = (n.celExpressions || []).filter(e => !rwSet.has(e));
+  if (otherCel.length) {
+    const lbl = n.isConditional ? 'includeWhen / CEL' : n.isStateNode ? 'state field expressions' : 'CEL expressions';
+    parts.push('<div class="detail-section"><div class="detail-section-title">' + esc(lbl) + '</div>' +
+      otherCel.map(e => celChip(e)).join('') + '</div>');
   }
-  body.innerHTML = rows.join('');
+
+  body.innerHTML = parts.join('');
+}
+
+function celChip(expr) {
+  const short = expr.length > 180 ? expr.slice(0, 177) + '…' : expr;
+  return '<div class="cel-chip" title="' + esc(expr) + '" onclick="navigator.clipboard&&navigator.clipboard.writeText(' + JSON.stringify(expr) + ')">' + esc(short) + '</div>';
+}
+
+function detailRow(label, value) {
+  return '<div class="detail-section"><div class="detail-section-title">' + esc(label) + '</div>' +
+    '<div style="font-size:12px;color:var(--text)">' + esc(String(value)) + '</div></div>';
 }
 
 document.getElementById('detail-close').addEventListener('click', () => {
   document.getElementById('detail-panel').classList.add('hidden');
 });
 
-function detailSection(label, value) {
-  return '<div class="detail-section"><div class="detail-section-title">' + esc(label) + '</div>' +
-    '<div style="font-size:12px;color:var(--text)">' + esc(value) + '</div></div>';
-}
-
 // ════════════════════════════════════════════════════════════════════════
 // Instance view
 // ════════════════════════════════════════════════════════════════════════
 function renderInstance(data) {
   if (!data || !data.instance) return;
-  const { instance, events, rgd, lastRefresh } = data;
+  const { instance, events, childResources, graph, nodeStates, reconciling, rgd, lastRefresh } = data;
 
+  // Refresh bar
   document.getElementById('refresh-label').textContent =
     'Live — ' + (rgd ? rgd.kind + ' ' : '') + instance.namespace + '/' + instance.name;
   if (lastRefresh) {
-    document.getElementById('refresh-time').textContent = 'updated ' + relTime(lastRefresh);
+    document.getElementById('refresh-time').textContent = 'refreshed ' + relTime(lastRefresh);
+  }
+  document.getElementById('refresh-spin').style.display = reconciling ? 'inline' : 'none';
+
+  // Reconciling banner
+  document.getElementById('instance-reconciling').style.display = reconciling ? 'flex' : 'none';
+
+  // Embedded DAG
+  if (graph) {
+    renderDagView(data, 'instance-dag-svg', true);
+    document.getElementById('instance-dag-wrap').style.display = 'block';
+  } else {
+    document.getElementById('instance-dag-wrap').style.display = 'none';
   }
 
-  // Left: spec + status
+  // Left: spec + conditions + status + child resources
   const left = document.getElementById('instance-left');
   const specEntries = flattenObj(instance.spec, '');
-  const statusEntries = flattenObj(instance.status, '');
-  const conditions = instance.status && instance.status.conditions ? instance.status.conditions : [];
+  const statusEntries = flattenObj(instance.status, '').filter(([k]) => k !== 'conditions' && !k.startsWith('conditions.'));
+  const conditions = (instance.status && instance.status.conditions) ? instance.status.conditions : [];
 
   left.innerHTML =
     '<div class="section-title">Spec</div>' +
     renderKV(specEntries) +
-    '<div class="section-title" style="margin-top:16px">Status</div>' +
-    (conditions.length ? '<div style="margin-bottom:8px">' + conditions.map(c =>
-      '<div class="condition-row">' +
-        '<div class="cond-dot ' + condClass(c.status) + '"></div>' +
-        '<span class="cond-label">' + esc(c.type) + '</span>' +
-        (c.reason ? '<span class="cond-reason">(' + esc(c.reason) + ')</span>' : '') +
-      '</div>'
-    ).join('') + '</div>' : '') +
-    renderKV(statusEntries);
+    '<div class="section-title" style="margin-top:14px">Conditions</div>' +
+    (conditions.length
+      ? '<div style="margin-bottom:10px">' + conditions.map(c =>
+          '<div class="condition-row">' +
+            '<div class="cond-dot ' + condClass(c.status) + '"></div>' +
+            '<span class="cond-label">' + esc(c.type) + '</span>' +
+            (c.reason ? '<span class="cond-reason">(' + esc(c.reason) + ')</span>' : '') +
+            (c.message ? '<span class="cond-reason" style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + esc(c.message) + '">' + esc(c.message.slice(0,60)) + (c.message.length>60?'…':'') + '</span>' : '') +
+          '</div>'
+        ).join('') + '</div>'
+      : '<div style="color:var(--text2);font-size:11px;margin-bottom:10px">No conditions</div>') +
+    '<div class="section-title" style="margin-top:14px">Status</div>' +
+    renderKV(statusEntries) +
+    renderChildResourcesSection(childResources);
 
   // Right: events
   const right = document.getElementById('instance-right');
   right.innerHTML = '<div class="section-title">Events (' + (events ? events.length : 0) + ')</div>';
   if (!events || events.length === 0) {
-    right.innerHTML += '<div style="color:var(--text2);font-size:11px;font-style:italic;">No events</div>';
+    right.innerHTML += '<div style="color:var(--text2);font-size:11px;font-style:italic;margin-top:4px">No events</div>';
   } else {
-    for (const ev of events.slice(0, 15)) {
+    for (const ev of events.slice(0, 20)) {
       const row = document.createElement('div');
       row.className = 'event-row';
       row.innerHTML =
         '<span class="event-type ' + (ev.type === 'Warning' ? 'event-warning' : 'event-normal') + '">' + esc(ev.type) + '</span>' +
         '<div class="event-reason">' + esc(ev.reason) + '</div>' +
-        '<div class="event-msg">' + esc(ev.message.slice(0, 140)) + '</div>' +
+        '<div class="event-msg">' + esc(ev.message.slice(0, 160)) + (ev.message.length>160?'…':'') + '</div>' +
         '<div class="event-meta">×' + ev.count + ' — ' + relTime(ev.lastTime) + '</div>';
       right.appendChild(row);
     }
   }
 }
 
+function renderChildResourcesSection(childResources) {
+  if (!childResources || childResources.length === 0) return '';
+  return '<div class="section-title" style="margin-top:14px">Child Resources (' + childResources.length + ')</div>' +
+    childResources.map(cr => {
+      const s = cr.status || 'unknown';
+      const cls = s === 'ready' || s === 'alive' ? 'csr-ready' : s === 'unknown' ? 'csr-unknown' : 'csr-other';
+      return '<div class="child-resource-row">' +
+        '<span class="child-kind-badge">' + esc(cr.kind) + '</span>' +
+        '<span class="child-name" title="' + esc(cr.name) + '">' + esc(cr.name) + '</span>' +
+        '<span class="child-status ' + cls + '">' + esc(s) + '</span>' +
+        '</div>';
+    }).join('');
+}
+
 function renderKV(entries) {
-  if (!entries || entries.length === 0) return '<div style="color:var(--text2);font-size:11px;">empty</div>';
-  return '<div class="kv-grid">' + entries.slice(0, 40).map(([k, v]) =>
-    '<span class="kv-key">' + esc(k) + '</span><span class="kv-val">' + esc(String(v).slice(0, 80)) + '</span>'
-  ).join('') + '</div>';
+  if (!entries || entries.length === 0) return '<div style="color:var(--text2);font-size:11px;margin-bottom:6px">empty</div>';
+  return '<div class="kv-grid" style="margin-bottom:6px">' +
+    entries.slice(0, 60).map(([k, v]) =>
+      '<span class="kv-key">' + esc(k) + '</span><span class="kv-val">' + esc(String(v).slice(0, 100)) + '</span>'
+    ).join('') + '</div>';
 }
 
 function condClass(s) {
@@ -768,18 +1207,20 @@ function renderYaml(data) {
 function highlightYaml(yaml) {
   return yaml.split('\\n').map(line => {
     const escaped = esc(line);
-    // key: value lines
-    const keyVal = escaped.match(/^(\\s*)(\\S+:)(\\s+)(.*)$/);
+    if (escaped.trimStart().startsWith('#')) return '<span class="yaml-comment">' + escaped + '</span>';
+    const keyVal = escaped.match(/^(\\s*)(\\S[^:]*:)(\\s+)(.*)$/);
     if (keyVal) {
       const [, indent, key, sp, val] = keyVal;
       let valHtml = '<span class="yaml-string">' + val + '</span>';
       if (val === 'true' || val === 'false') valHtml = '<span class="yaml-bool">' + val + '</span>';
       else if (val === 'null' || val === '~') valHtml = '<span class="yaml-null">' + val + '</span>';
-      else if (/^-?\\d+(\\.\\d+)?$/.test(val)) valHtml = '<span class="yaml-number">' + val + '</span>';
       else if (val === '') valHtml = '';
+      else if (/^-?\\d+(\\.\\d+)?$/.test(val)) valHtml = '<span class="yaml-number">' + val + '</span>';
       return indent + '<span class="yaml-key">' + key + '</span>' + sp + valHtml;
     }
-    if (escaped.trimStart().startsWith('#')) return '<span class="yaml-comment">' + escaped + '</span>';
+    // list item
+    const listItem = escaped.match(/^(\\s*-\\s+)(.*)$/);
+    if (listItem) return listItem[1] + '<span class="yaml-string">' + listItem[2] + '</span>';
     return escaped;
   }).join('\\n');
 }
@@ -791,25 +1232,12 @@ function svgEl(tag) {
   return document.createElementNS('http://www.w3.org/2000/svg', tag);
 }
 
-function badge(text, color, bg, x, y) {
-  const g = svgEl('g');
-  const rect = svgEl('rect');
-  rect.setAttribute('x', x - 2); rect.setAttribute('y', y);
-  rect.setAttribute('width', 16); rect.setAttribute('height', 13);
-  rect.setAttribute('rx', 3); rect.setAttribute('fill', bg);
-  const t = svgEl('text');
-  t.setAttribute('x', x + 6); t.setAttribute('y', y + 10);
-  t.setAttribute('font-size', '9'); t.setAttribute('text-anchor', 'middle');
-  t.setAttribute('fill', color); t.textContent = text;
-  g.appendChild(rect); g.appendChild(t);
-  return g;
-}
-
 function esc(str) {
   return String(str ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
 function truncate(s, n) {
+  if (!s) return '';
   return s.length > n ? s.slice(0, n - 1) + '…' : s;
 }
 
@@ -830,4 +1258,5 @@ connect();
 </script>
 </body>
 </html>`;
+  return html.replace("__VERSION_STAMP__", "v" + VERSION + " \u00b7 " + BUILD_TIME);
 }

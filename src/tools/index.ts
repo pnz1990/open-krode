@@ -10,12 +10,19 @@ import {
   getChildResources,
   getKubeContexts,
   getCurrentContext,
+  detectReconciling,
+  buildNodeLiveStates,
 } from "@/kro";
 
 const WATCH_INTERVAL_MS = 5000;
 
+// Returns the effective kubectl context: explicit arg > session-stored context
+function resolveContext(mgr: SessionManager, sessionId: string, explicitContext?: string): string | undefined {
+  if (explicitContext) return explicitContext;
+  return mgr.getSession(sessionId)?.kubectlContext;
+}
+
 // ─── open_krode_session ───────────────────────────────────────────────────────
-// Opens the browser window for the current kro exploration session.
 
 export function makeOpenSessionTool(mgr: SessionManager) {
   return tool({
@@ -28,13 +35,11 @@ export function makeOpenSessionTool(mgr: SessionManager) {
     },
     async execute(args) {
       const context = args.kubectl_context;
-      const { sessionId, url } = await mgr.startSession();
-
-      // Detect current context for the session metadata
       const currentCtx = context ?? (await getCurrentContext());
+      const { sessionId, url } = await mgr.startSession(currentCtx);
+
       const contexts = await getKubeContexts();
 
-      // Pre-load RGD list into the session
       let rgds: Awaited<ReturnType<typeof listRGDs>> = [];
       try {
         rgds = await listRGDs(context);
@@ -53,7 +58,7 @@ export function makeOpenSessionTool(mgr: SessionManager) {
         },
       );
 
-      return `session_id: ${sessionId}\nurl: ${url}\n\nBrowser opened at ${url}. Use session_id="${sessionId}" in subsequent tools.\n\nFound ${rgds.length} RGD(s): ${rgds.map((r) => r.name).join(", ") || "(none)"}`;
+      return `session_id: ${sessionId}\nurl: ${url}\nkubectl_context: ${currentCtx}\n\nBrowser opened at ${url}. Use session_id="${sessionId}" in subsequent tools.\nAll tools will automatically use context "${currentCtx}" unless overridden.\n\nFound ${rgds.length} RGD(s): ${rgds.map((r) => r.name).join(", ") || "(none)"}`;
     },
   });
 }
@@ -63,7 +68,7 @@ export function makeOpenSessionTool(mgr: SessionManager) {
 export function makeShowRgdGraphTool(mgr: SessionManager) {
   return tool({
     description:
-      "Show the resource dependency graph (DAG) for a kro ResourceGraphDefinition in the browser UI. The graph shows all managed resources, state nodes, conditional edges (includeWhen), forEach fan-outs, and CEL expressions.",
+      "Show the resource dependency graph (DAG) for a kro ResourceGraphDefinition in the browser UI. The graph shows all managed resources, state nodes, conditional edges (includeWhen), forEach fan-outs, and CEL expressions. Uses CEL reference parsing to build a true multi-depth graph.",
     args: {
       session_id: tool.schema.string().describe("session_id returned by open_krode_session"),
       rgd_name: tool.schema.string().describe("Name of the RGD (e.g. dungeon-graph)"),
@@ -71,7 +76,7 @@ export function makeShowRgdGraphTool(mgr: SessionManager) {
     },
     async execute(args) {
       const { session_id, rgd_name } = args;
-      const context = args.kubectl_context;
+      const context = resolveContext(mgr, session_id, args.kubectl_context);
 
       const detail = await getRGDDetail(rgd_name, context);
       const graph = buildRGDGraph(detail);
@@ -92,6 +97,9 @@ export function makeShowRgdGraphTool(mgr: SessionManager) {
         stateNodes: graph.nodes.filter((n) => n.isStateNode).map((n) => n.label),
         conditionalNodes: graph.nodes.filter((n) => n.isConditional).map((n) => n.label),
         forEachNodes: graph.nodes.filter((n) => n.isForEach).map((n) => n.label),
+        // RGD-only graph has no live instance data
+        nodeStates: {},
+        reconciling: false,
       });
 
       const stateNodesList = graph.nodes.filter((n) => n.isStateNode).map((n) => n.label);
@@ -126,9 +134,8 @@ export function makeListInstancesTool(mgr: SessionManager) {
     },
     async execute(args) {
       const { session_id, rgd_name } = args;
-      const context = args.kubectl_context;
+      const context = resolveContext(mgr, session_id, args.kubectl_context);
 
-      // Need the RGD summary to know the group/kind
       const rgds = await listRGDs(context);
       const rgd = rgds.find((r) => r.name === rgd_name);
       if (!rgd) {
@@ -137,7 +144,6 @@ export function makeListInstancesTool(mgr: SessionManager) {
 
       const instances = await listInstances(rgd, args.namespace, context);
 
-      // Update the home view with instance list
       const homeView = [...(mgr.getSession(session_id)?.views.values() ?? [])].find(
         (v) => v.mode === "rgd-graph" && v.target === "__home__",
       );
@@ -165,7 +171,7 @@ export function makeListInstancesTool(mgr: SessionManager) {
 export function makeShowInstanceTool(mgr: SessionManager) {
   return tool({
     description:
-      "Open a live observability view for a specific CR instance managed by kro. Shows the instance spec/status, live reconcile state, and starts a 5-second polling watcher that auto-refreshes the browser UI.",
+      "Open a live observability view for a specific CR instance managed by kro. Shows the live DAG with node states (alive/reconciling/pending/locked), reconcile animation, spec/status diff, events, and child resources. Starts a 5-second polling watcher. Click any node in the browser to inspect its YAML.",
     args: {
       session_id: tool.schema.string().describe("session_id returned by open_krode_session"),
       rgd_name: tool.schema.string().describe("RGD name (e.g. dungeon-graph)"),
@@ -175,7 +181,7 @@ export function makeShowInstanceTool(mgr: SessionManager) {
     },
     async execute(args) {
       const { session_id, rgd_name, namespace, name } = args;
-      const context = args.kubectl_context;
+      const context = resolveContext(mgr, session_id, args.kubectl_context);
 
       const rgds = await listRGDs(context);
       const rgd = rgds.find((r) => r.name === rgd_name);
@@ -183,8 +189,29 @@ export function makeShowInstanceTool(mgr: SessionManager) {
         return `RGD "${rgd_name}" not found.`;
       }
 
+      // Fetch RGD detail once — used for graph and child kind derivation
+      const detail = await getRGDDetail(rgd_name, context);
+      const graph = buildRGDGraph(detail);
+
       const instance = await getInstance(rgd.kind, rgd.group, namespace, name, context);
       const events = await getInstanceEvents(namespace, name, context);
+
+      // Derive child resource kinds from the RGD's resource templates
+      let childKinds: string[] = ["configmaps"];
+      for (const res of detail.spec.resources ?? []) {
+        const r = res as { template?: unknown };
+        const tmpl = r.template as Record<string, unknown> | undefined;
+        if (typeof tmpl?.kind === "string") {
+          childKinds.push(tmpl.kind.toLowerCase() + "s");
+        }
+      }
+      childKinds = [...new Set(childKinds)].filter(
+        (k) => k !== rgd.kind.toLowerCase() + "s",
+      );
+
+      const childResources = await getChildResources(namespace, name, childKinds, context);
+      const reconciling = detectReconciling(instance);
+      const nodeStates = buildNodeLiveStates(instance, childResources, graph, reconciling);
 
       const viewId = mgr.openView(session_id, {
         mode: "instance-graph",
@@ -195,33 +222,46 @@ export function makeShowInstanceTool(mgr: SessionManager) {
       mgr.updateViewData(session_id, viewId, {
         instance,
         events,
+        childResources,
+        graph,
+        nodeStates,
+        reconciling,
         rgd: { name: rgd_name, kind: rgd.kind, group: rgd.group },
+        namespace,
+        instanceName: name,
+        kubectlContext: context,
         lastRefresh: new Date().toISOString(),
       });
 
-      // Start live watcher
+      // Live watcher — refreshes every 5s
       mgr.startWatcher(session_id, viewId, WATCH_INTERVAL_MS, async () => {
         const fresh = await getInstance(rgd.kind, rgd.group, namespace, name, context);
         const freshEvents = await getInstanceEvents(namespace, name, context);
+        const freshChildren = await getChildResources(namespace, name, childKinds, context);
+        const freshReconciling = detectReconciling(fresh);
+        const freshStates = buildNodeLiveStates(fresh, freshChildren, graph, freshReconciling);
         mgr.updateViewData(session_id, viewId, {
           instance: fresh,
           events: freshEvents,
+          childResources: freshChildren,
+          nodeStates: freshStates,
+          reconciling: freshReconciling,
           lastRefresh: new Date().toISOString(),
         });
       });
 
       const conditionsSummary = instance.conditions
-        ? (instance.conditions as Array<{ type: string; status: string }>)
-            .map((c) => `${c.type}=${c.status}`)
-            .join(", ")
-        : "none";
+        .map((c) => `${c.type}=${c.status}`)
+        .join(", ") || "none";
 
       return [
         `Opened live instance view for ${namespace}/${name} (view: ${viewId})`,
         `  RGD: ${rgd_name} | Kind: ${rgd.kind}`,
-        `  Status conditions: ${conditionsSummary}`,
-        `  Recent events: ${events.length}`,
-        `  Auto-refreshing every ${WATCH_INTERVAL_MS / 1000}s`,
+        `  Status: ${reconciling ? "RECONCILING" : "stable"}`,
+        `  Conditions: ${conditionsSummary}`,
+        `  Events: ${events.length} | Child resources: ${childResources.length}`,
+        `  Graph: ${graph.nodes.length} nodes across ${new Set(Object.values(nodeStates)).size} states`,
+        `  Auto-refreshing every ${WATCH_INTERVAL_MS / 1000}s — click any node in browser to inspect YAML`,
       ].join("\n");
     },
   });
@@ -241,7 +281,7 @@ export function makeShowEventsTool(mgr: SessionManager) {
     },
     async execute(args) {
       const { session_id, namespace, name } = args;
-      const context = args.kubectl_context;
+      const context = resolveContext(mgr, session_id, args.kubectl_context);
 
       const events = await getInstanceEvents(namespace, name, context);
 
@@ -280,7 +320,7 @@ export function makeShowYamlTool(mgr: SessionManager) {
     },
     async execute(args) {
       const { session_id, rgd_name, namespace, name } = args;
-      const context = args.kubectl_context;
+      const context = resolveContext(mgr, session_id, args.kubectl_context);
 
       const rgds = await listRGDs(context);
       const rgd = rgds.find((r) => r.name === rgd_name);

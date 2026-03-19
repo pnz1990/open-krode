@@ -1,6 +1,6 @@
 {
   "name": "open-krode",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "OpenCode plugin for kro RGD visualization and live instance observability",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -15,8 +15,8 @@
     }
   },
   "scripts": {
-    "build": "bun build src/index.ts --outdir dist --target bun --format esm && tsc --emitDeclarationOnly",
-    "install:plugin": "bun run build && cp dist/index.js package.json ~/.cache/opencode/node_modules/open-krode/",
+    "build": "echo \"export const BUILD_TIME = '$(date -u '+%Y-%m-%d %H:%M UTC')';\" > src/build-stamp.ts && bun build src/index.ts --outdir dist --target bun --format esm && tsc --emitDeclarationOnly && bun scripts/write-ui-html.ts",
+    "install:plugin": "bun run build && mkdir -p ~/.cache/opencode/node_modules/open-krode/dist && cp dist/index.js ~/.cache/opencode/node_modules/open-krode/dist/index.js && cp package.json ~/.cache/opencode/node_modules/open-krode/package.json",
     "clean": "rm -rf dist",
     "typecheck": "tsc --noEmit",
     "test": "bun test",

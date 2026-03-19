@@ -86,6 +86,53 @@ bun install
 bun run build   # outputs to dist/
 ```
 
+## Plugin Installation & Development Workflow
+
+**CRITICAL — read this before touching the plugin or telling the user to restart.**
+
+### How OpenCode loads this plugin
+
+`~/.config/opencode/opencode.json` currently uses the **local path** (already switched):
+```json
+{
+  "plugin": ["@different-ai/opencode-browser", "/Users/rrroizma/Projects/open-krode"]
+}
+```
+OpenCode loads the plugin once at startup from `dist/index.js` into memory. The JS bundle itself is immutable for the lifetime of the process.
+
+### UI hot-reload (implemented — no restart needed for UI changes)
+
+`src/session/server.ts` was changed to **read `dist/ui.html` from disk on every `GET /`** instead of caching the HTML at startup.
+
+`bun run build` now also runs `scripts/write-ui-html.ts` which writes the rendered HTML to `dist/ui.html`.
+
+**Dev workflow for UI-only changes:**
+1. Edit `src/ui/bundle.ts`
+2. `bun run build` — rebuilds `dist/index.js` + writes `dist/ui.html`
+3. Browser refresh — done. No OpenCode restart needed.
+
+**When a restart IS still required:**
+- Changes to any non-UI TypeScript (tools, session manager, kubectl, server logic)
+- After the very first time you apply the hot-reload patch (one-time bootstrap)
+
+### Correct update workflow for logic changes
+
+1. Make code changes
+2. `bun run build`
+3. Fully quit and restart OpenCode (kill all `opencode` processes)
+4. Verify in the browser: topbar should show `v0.2.0 · <build time>` and `class="ctx-badge"` (not the old `class="ctx"`)
+
+### Diagnosing stale UI
+
+Check what the running server is actually serving:
+```bash
+curl -s http://localhost:<PORT>/ | grep -o 'ctx-badge\|class="ctx"\|v0\.[0-9]'
+```
+- `ctx-badge` + version stamp → latest build is live
+- `class="ctx"` or no version → stale in-memory bundle, OpenCode needs restart
+
+The old CSS used `class="ctx"` and `id="ctx"`. The current code uses `class="ctx-badge"` and `id="ctx-badge"`. This is the canonical staleness indicator.
+
 ## Development Rules
 
 - **Never run locally** — the plugin is loaded by OpenCode; the Bun server starts on demand when a session is opened
@@ -101,3 +148,31 @@ bun run build   # outputs to dist/
 3. **Live watchers** — `startWatcher` uses `setInterval` in the plugin process; pushes updates over WS. Cleaned up on `endSession` or `close_krode_session`.
 4. **DAG layout is BFS-layered** — pure JS, no D3 or force simulation. Deterministic and fast.
 5. **Conditions use `status.conditions` array** — kro follows standard K8s condition conventions.
+6. **UI hot-reload via `dist/ui.html`** — `scripts/write-ui-html.ts` writes the rendered HTML bundle to `dist/ui.html` at build time. `server.ts` reads this file from disk on every `GET /` request (with in-process fallback). This means UI-only changes only need `bun run build` + browser refresh — no OpenCode restart.
+
+---
+
+## Copy-paste prompt for next session
+
+Use this at the start of a new OpenCode session to restore context:
+
+```
+We are working on open-krode: an OpenCode plugin at /Users/rrroizma/Projects/open-krode.
+
+Key context:
+- Plugin is loaded by OpenCode from the local path (not npm). Config: ~/.config/opencode/opencode.json has "plugin": ["@different-ai/opencode-browser", "/Users/rrroizma/Projects/open-krode"]
+- OpenCode loads dist/index.js into memory at startup. Non-UI logic changes require a full OpenCode restart.
+- UI hot-reload IS implemented: server.ts reads dist/ui.html from disk on every GET /. So UI-only changes (src/ui/bundle.ts) only need `bun run build` + browser refresh — no restart.
+- Build command: `bun run build` — rebuilds dist/index.js AND writes dist/ui.html via scripts/write-ui-html.ts
+- Staleness check: `curl -s http://localhost:<PORT>/ | grep -o 'ctx-badge\|class="ctx"\|v0\.[0-9]'`
+  - ctx-badge + version stamp = fresh
+  - class="ctx" = stale in-memory bundle (OpenCode needs restart)
+- Version stamp in topbar: "v0.2.0 · <build time UTC>" — missing or __VERSION_STAMP__ means stale
+
+To verify the UI is running the latest build:
+1. Open a session: use the open_krode_session tool
+2. curl the served port and grep for ctx-badge and the version string
+3. If stale: restart OpenCode (kill all opencode processes), then reopen session
+
+Last session we fixed the stale UI problem by implementing UI hot-reload. The one-time restart to activate that fix may still be pending if OpenCode hasn't been restarted since.
+```
