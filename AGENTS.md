@@ -133,6 +133,25 @@ curl -s http://localhost:<PORT>/ | grep -o 'ctx-badge\|class="ctx"\|v0\.[0-9]'
 
 The old CSS used `class="ctx"` and `id="ctx"`. The current code uses `class="ctx-badge"` and `id="ctx-badge"`. This is the canonical staleness indicator.
 
+### Known past bug (fixed in commit 8d1edb5)
+
+`import.meta.dir` is Bun-specific and is `undefined` when OpenCode loads the plugin via Node.js. This caused `readFileSync` to silently fail and fall back to `getHtmlBundle()` (the in-memory bundle), making hot-reload appear broken even after a restart.
+
+The fix in `server.ts`:
+```ts
+const _metaDir: string =
+  (import.meta as { dir?: string }).dir ??
+  (() => {
+    const { fileURLToPath } = require("node:url");
+    return join(fileURLToPath(import.meta.url), "..");
+  })();
+```
+This is committed and pushed. If hot-reload is still not working after a restart, check this code is present in `dist/index.js`:
+```bash
+grep 'fileURLToPath' /Users/rrroizma/Projects/open-krode/dist/index.js
+```
+If missing: run `bun run build` then restart OpenCode.
+
 ## Development Rules
 
 - **Never run locally** — the plugin is loaded by OpenCode; the Bun server starts on demand when a session is opened
@@ -169,10 +188,34 @@ Key context:
   - class="ctx" = stale in-memory bundle (OpenCode needs restart)
 - Version stamp in topbar: "v0.2.0 · <build time UTC>" — missing or __VERSION_STAMP__ means stale
 
-To verify the UI is running the latest build:
-1. Open a session: use the open_krode_session tool
-2. curl the served port and grep for ctx-badge and the version string
-3. If stale: restart OpenCode (kill all opencode processes), then reopen session
+## MANDATORY: Verify the UI before doing any work
 
-Last session we fixed the stale UI problem by implementing UI hot-reload. The one-time restart to activate that fix may still be pending if OpenCode hasn't been restarted since.
+Run these steps AT THE START of every session, in order. Do not skip or assume anything.
+
+### Step 1 — Check the build is current
+```bash
+grep 'fileURLToPath' /Users/rrroizma/Projects/open-krode/dist/index.js
+```
+- If output is empty: run `bun run build` first. The hot-reload fix is missing from dist/.
+
+### Step 2 — Check process start time vs build time
+```bash
+ps aux | grep opencode | grep -v grep
+ls -la /Users/rrroizma/Projects/open-krode/dist/index.js
+```
+- If OpenCode started BEFORE dist/index.js was last modified: OpenCode has stale code in memory. A restart is required.
+- If OpenCode started AFTER dist/index.js was last modified: hot-reload should work — no restart needed.
+
+### Step 3 — Open a session and curl the served port
+```bash
+# after open_krode_session returns the port:
+curl -s http://localhost:<PORT>/ | grep -o 'ctx-badge\|class="ctx"\|v0\.[0-9]'
+```
+- `ctx-badge` = fresh. Proceed.
+- `class="ctx"` = stale. Do NOT just say "restart OpenCode". First re-check Steps 1 and 2 to understand WHY it's stale before acting.
+
+### What NOT to do
+- Do NOT blindly tell the user to restart OpenCode without first diagnosing why the UI is stale.
+- Do NOT assume a restart will fix it if we've already restarted once this session.
+- If stale after a confirmed restart: the fix in dist/index.js is likely missing or wrong. Check `grep 'fileURLToPath' dist/index.js` and re-read server.ts.
 ```
