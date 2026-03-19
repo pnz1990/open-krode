@@ -30,13 +30,24 @@ const _metaDir: string =
     const { fileURLToPath } = require("node:url") as { fileURLToPath: (u: string) => string };
     return join(fileURLToPath(import.meta.url), "..");
   })();
-const UI_HTML_PATH = join(_metaDir, "ui.html");
+const UI_HTML_PATH  = join(_metaDir, "ui.html");
+const LOGO_PATH     = join(_metaDir, "logo.png");
+const FAVICON_PATH  = join(_metaDir, "favicon.png");
 
 function serveHtml(): string {
   try {
     return readFileSync(UI_HTML_PATH, "utf-8");
   } catch {
     return getHtmlBundle();
+  }
+}
+
+function serveImage(path: string, contentType: string): Response {
+  try {
+    const data = readFileSync(path);
+    return new Response(data, { headers: { "Content-Type": contentType, "Cache-Control": "public, max-age=86400" } });
+  } catch {
+    return new Response("Not Found", { status: HTTP_NOT_FOUND });
   }
 }
 
@@ -312,6 +323,9 @@ export async function createSessionServer(
           headers: { "Content-Type": "text/html; charset=utf-8" },
         });
       }
+
+      if (url.pathname === "/logo.png") return serveImage(LOGO_PATH, "image/png");
+      if (url.pathname === "/favicon.png") return serveImage(FAVICON_PATH, "image/png");
 
       return new Response("Not Found", { status: HTTP_NOT_FOUND });
     },

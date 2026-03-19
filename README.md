@@ -1,5 +1,7 @@
 # open-krode
 
+![open-krode logo](logo.png)
+
 An [OpenCode](https://opencode.ai) plugin that adds a specialized `krode` agent for exploring and troubleshooting [kro](https://kro.run) ResourceGraphDefinitions (RGDs) and their live instances — directly in your browser.
 
 ## What it does

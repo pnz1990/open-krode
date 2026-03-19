@@ -59,6 +59,7 @@ export function getHtmlBundle(): string {
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>open-krode — kro explorer</title>
+<link rel="icon" type="image/png" href="/favicon.png" />
 <style>
 /* ── reset & tokens ─────────────────────────────────────────────────── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -108,8 +109,10 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
 #main { overflow: hidden; display: flex; flex-direction: column; position: relative; }
 
 /* ── topbar ─────────────────────────────────────────────────────────── */
-.logo { font-weight: 700; font-size: 15px; letter-spacing: 0.5px; color: var(--accent); }
-.logo span { color: var(--text2); font-weight: 400; }
+.logo { display: flex; align-items: center; gap: 8px; text-decoration: none; }
+#topbar-logo { height: 28px; width: auto; display: block; flex-shrink: 0; }
+.logo-text { font-weight: 700; font-size: 15px; letter-spacing: 0.5px; color: var(--accent); }
+.logo-text span { color: var(--text2); font-weight: 400; }
 .ctx-badge { background: var(--bg3); border: 1px solid var(--border); border-radius: 4px;
   padding: 3px 8px; font-size: 11px; color: var(--text2); white-space: nowrap; overflow: hidden;
   max-width: 360px; text-overflow: ellipsis; }
@@ -352,7 +355,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
 <div id="app">
   <!-- TOPBAR -->
   <div id="topbar">
-    <div class="logo">open-krode <span>/ kro explorer</span></div>
+    <div class="logo"><img src="/logo.png" alt="open-krode" id="topbar-logo" /><span class="logo-text">open-krode <span>/ kro explorer</span></span></div>
     <div class="ctx-badge" id="ctx-badge">connecting…</div>
     <div style="font-size:10px;color:var(--text2);white-space:nowrap;flex-shrink:0">__VERSION_STAMP__</div>
     <div class="ml-auto" style="display:flex;align-items:center;gap:8px;">
