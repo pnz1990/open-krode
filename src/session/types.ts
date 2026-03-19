@@ -4,7 +4,7 @@
 export type SessionId = string;
 export type ViewId = string;
 
-export type ViewMode = "rgd-graph" | "instance-graph" | "instance-events" | "instance-yaml";
+export type ViewMode = "rgd-graph" | "instance-graph" | "deep-instance" | "instance-events" | "instance-yaml";
 
 export interface View {
   id: ViewId;
@@ -18,6 +18,27 @@ export interface View {
   data: Record<string, unknown>;
 }
 
+// ─── Simple TTL cache ──────────────────────────────────────────────────────────
+interface CacheEntry<T> { value: T; expiresAt: number }
+
+export class KrodeCache {
+  private store = new Map<string, CacheEntry<unknown>>();
+
+  get<T>(key: string): T | undefined {
+    const entry = this.store.get(key) as CacheEntry<T> | undefined;
+    if (!entry) return undefined;
+    if (Date.now() > entry.expiresAt) { this.store.delete(key); return undefined; }
+    return entry.value;
+  }
+
+  set<T>(key: string, value: T, ttlMs: number): void {
+    this.store.set(key, { value, expiresAt: Date.now() + ttlMs });
+  }
+
+  delete(key: string): void { this.store.delete(key); }
+  clear(): void { this.store.clear(); }
+}
+
 export interface KrodeSession {
   id: SessionId;
   port: number;
@@ -27,6 +48,8 @@ export interface KrodeSession {
   ws: WebSocket | null;
   // watch interval ids
   watchers: Map<ViewId, ReturnType<typeof setInterval>>;
+  // in-process cache to avoid redundant kubectl calls
+  cache: KrodeCache;
 }
 
 // WebSocket messages: server → browser

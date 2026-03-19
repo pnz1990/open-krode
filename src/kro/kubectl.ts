@@ -163,12 +163,22 @@ export function buildRGDGraph(detail: RGDDetail): RGDGraph {
       ...Object.values(r.state?.fields ?? {}),
     ];
 
+    // Extract forEach expression string
+    let forEachExpr: string | undefined;
+    if (r.forEach) {
+      const fe = r.forEach as Record<string, unknown>;
+      forEachExpr = typeof fe.in === "string" ? fe.in : JSON.stringify(fe).slice(0, 120);
+    }
+
     // Build a detail hint from CEL metadata
     const parts: string[] = [];
     if (isConditional) parts.push(`includeWhen: ${(r.includeWhen ?? []).join("; ").slice(0, 60)}`);
     if (r.readyWhen?.length) parts.push(`readyWhen: ${r.readyWhen[0]!.slice(0, 60)}`);
     if (isForEach) parts.push("forEach fan-out");
     if (isState) parts.push(`specPatch → ${r.state?.storeName ?? "?"}`);
+
+    // Template snippet (first ~400 chars of YAML-like representation)
+    const tmplStr = r.template ? JSON.stringify(r.template, null, 2).slice(0, 500) : undefined;
 
     nodes.push({
       id: nodeId,
@@ -180,6 +190,10 @@ export function buildRGDGraph(detail: RGDDetail): RGDGraph {
       isForEach,
       celExpressions: celExprs,
       readyWhen: r.readyWhen ?? [],
+      includeWhen: r.includeWhen,
+      forEachExpr,
+      stateFields: r.state?.fields,
+      templateSnippet: tmplStr,
       exists: true,
       detail: parts.join(" · ") || resKind,
       liveState: "unknown",
@@ -531,4 +545,286 @@ export async function getCurrentContext(): Promise<string> {
   } catch {
     return "";
   }
+}
+
+// ─── Deep instance graph ──────────────────────────────────────────────────────
+//
+// Builds a multi-level graph for a live CR instance by:
+// 1. Starting from the root CR (rgd root node)
+// 2. Scanning its managed namespace for child CRs owned by it
+// 3. For forEach resources: finding all expansion instances (e.g. myapp-item-0/1/2)
+// 4. For each child CR that maps to another RGD: recursively expanding it
+// 5. Fetching YAML for every concrete node (for click-to-inspect)
+//
+// Max depth is 4 levels to keep the graph readable.
+
+const MAX_DEEP_DEPTH = 4;
+
+export async function buildDeepInstanceGraph(
+  rgds: RGDSummary[],
+  rootRgdName: string,
+  namespace: string,
+  instanceName: string,
+  context?: string,
+  resolvers?: {
+    getRGDDetail?: (name: string, ctx?: string) => Promise<RGDDetail>;
+    getResourceYaml?: (ns: string, kind: string, name: string, ctx?: string) => Promise<string>;
+  },
+): Promise<import("./types").DeepInstanceGraph> {
+  const nodes: import("./types").GraphNode[] = [];
+  const edges: import("./types").GraphEdge[] = [];
+  const yamlCache: Record<string, string> = {};
+
+  // Allow callers to inject cached versions of these functions
+  const _getRGDDetail = resolvers?.getRGDDetail ?? getRGDDetail;
+  const _getResourceYaml = resolvers?.getResourceYaml ?? getResourceYaml;
+
+  // Build a map of kind → RGD for cross-RGD lookup
+  const kindToRgd = new Map<string, RGDSummary>();
+  for (const rgd of rgds) {
+    kindToRgd.set(rgd.kind.toLowerCase(), rgd);
+  }
+
+  // Recursive expander
+  async function expand(
+    rgdName: string,
+    crNamespace: string,
+    crName: string,
+    parentNodeId: string | null,
+    depth: number,
+    edgeLabel: string | undefined,
+  ): Promise<void> {
+    if (depth > MAX_DEEP_DEPTH) return;
+
+    const rgd = rgds.find((r) => r.name === rgdName);
+    if (!rgd) return;
+
+    const nodeId = `node:${rgdName}:${crNamespace}/${crName}`;
+    const isRoot = parentNodeId === null;
+
+    // Determine live state from the CR itself
+    let liveState: import("./types").LiveState = "unknown";
+    let rawYaml = "";
+    let conditions: import("./types").RGDCondition[] = [];
+    let crSpec: Record<string, unknown> = {};
+    let crStatus: Record<string, unknown> = {};
+
+    try {
+      const detail = await getInstance(rgd.kind, rgd.group, crNamespace, crName, context);
+      rawYaml = detail.rawYaml;
+      conditions = detail.conditions;
+      crSpec = detail.spec;
+      crStatus = detail.status;
+      const reconciling = detectReconciling(detail);
+      const ready = conditions.find((c) => c.type === "Ready");
+      if (reconciling) liveState = "reconciling";
+      else if (ready?.status === "True") liveState = "alive";
+      else if (ready?.status === "False") liveState = "error";
+      else liveState = "ok";
+    } catch {
+      liveState = "not-found";
+    }
+
+    if (rawYaml) yamlCache[nodeId] = rawYaml;
+
+    nodes.push({
+      id: nodeId,
+      label: crName,
+      kind: isRoot ? "root" : "resource",
+      resourceKind: rgd.kind,
+      isConditional: false,
+      isStateNode: false,
+      isForEach: false,
+      celExpressions: [],
+      readyWhen: [],
+      liveState,
+      liveConditions: conditions,
+      namespace: crNamespace,
+      crName,
+      rgdName,
+      depth,
+      parentId: parentNodeId ?? undefined,
+      detail: `${rgd.group}/${rgd.kind} · ${crNamespace}/${crName}`,
+    });
+
+    if (parentNodeId) {
+      edges.push({
+        from: parentNodeId,
+        to: nodeId,
+        label: edgeLabel,
+        conditional: false,
+        dashed: false,
+      });
+    }
+
+    if (depth >= MAX_DEEP_DEPTH) return;
+
+    // Now fetch the RGD detail to know what child resources to expect
+    let rgdDetail: RGDDetail | null = null;
+    try {
+      rgdDetail = await _getRGDDetail(rgdName, context);
+    } catch {
+      return;
+    }
+
+    const resources = (rgdDetail.spec.resources ?? []) as import("./types").RGDResource[];
+
+    // Determine the managed namespace: kro typically creates a Namespace resource
+    // named after the CR, or uses the CR's own namespace
+    const managedNs = crNamespace === "default"
+      ? crName  // kro often creates a namespace matching the CR name
+      : crNamespace;
+
+    // Try both the CR's namespace and a namespace named after the CR
+    const namespacesToScan = [...new Set([crNamespace, crName, managedNs])];
+
+    for (const r of resources) {
+      const tmpl = r.template as Record<string, unknown> | undefined;
+      const resKind = typeof tmpl?.kind === "string" ? tmpl.kind : null;
+      if (!resKind) continue; // state node with no kind — skip for deep graph
+
+      const isForEach = !!r.forEach;
+      const isConditional = (r.includeWhen ?? []).length > 0;
+      const childRgd = resKind ? kindToRgd.get(resKind.toLowerCase()) : undefined;
+
+      if (childRgd) {
+        // This resource is a CR managed by another RGD — find live instances
+        for (const ns of namespacesToScan) {
+          try {
+            const childInstances = await listInstances(childRgd, ns, context);
+            const owned = childInstances.filter(
+              (i) =>
+                i.name.startsWith(crName) ||
+                i.name === crName + "-" + r.id ||
+                i.name === crName + r.id,
+            );
+            for (const child of owned) {
+              await expand(childRgd.name, child.namespace, child.name, nodeId, depth + 1, isForEach ? "forEach" : undefined);
+            }
+            // If we found instances in this ns, don't try others
+            if (owned.length > 0) break;
+          } catch {
+            // namespace may not exist
+          }
+        }
+      } else if (resKind.toLowerCase() !== "namespace") {
+        // Non-RGD child resource (ConfigMap, Secret, etc.) — try candidate names in parallel
+        for (const ns of namespacesToScan) {
+          const candidateNames = [
+            `${crName}-${r.id}`,
+            `${crName}`,
+            r.id,
+          ];
+
+          // Fetch all candidates in parallel; take the first hit
+          const results = await Promise.allSettled(
+            candidateNames.map(n => _getResourceYaml(ns, resKind, n, context).then(y => ({ name: n, yaml: y }))),
+          );
+
+          let found = false;
+          for (const res of results) {
+            if (res.status === "fulfilled" && res.value.yaml) {
+              const { name: candidateName, yaml } = res.value;
+              const leafId = `leaf:${resKind}:${ns}/${candidateName}`;
+              if (!nodes.find((n) => n.id === leafId)) {
+                nodes.push({
+                  id: leafId,
+                  label: candidateName,
+                  kind: "resource",
+                  resourceKind: resKind,
+                  isConditional,
+                  isStateNode: false,
+                  isForEach,
+                  celExpressions: [],
+                  readyWhen: r.readyWhen ?? [],
+                  liveState: "alive",
+                  namespace: ns,
+                  crName: candidateName,
+                  depth: depth + 1,
+                  parentId: nodeId,
+                  detail: `${resKind} · ${ns}/${candidateName}`,
+                });
+                yamlCache[leafId] = yaml;
+                edges.push({
+                  from: nodeId,
+                  to: leafId,
+                  label: isForEach ? "forEach" : isConditional ? "includeWhen" : undefined,
+                  conditional: isConditional,
+                  dashed: isConditional,
+                });
+              }
+              found = true;
+              break;
+            }
+          }
+
+          // For forEach: scan namespace for all matching resources
+          if (isForEach && !found) {
+            try {
+              const raw = await run(kubectl(`get ${resKind} -n ${ns} -o json`, context));
+              const parsed = JSON.parse(raw) as {
+                items: Array<{ metadata: { name: string }; status?: Record<string, unknown> }>;
+              };
+              // Fetch YAML for all matching forEach items in parallel
+              const forEachItems = parsed.items.filter(item => item.metadata.name.startsWith(crName));
+              await Promise.allSettled(forEachItems.map(async item => {
+                const leafId = `leaf:${resKind}:${ns}/${item.metadata.name}`;
+                if (nodes.find((n) => n.id === leafId)) return;
+                const yaml = await _getResourceYaml(ns, resKind, item.metadata.name, context);
+                nodes.push({
+                  id: leafId,
+                  label: item.metadata.name,
+                  kind: "resource",
+                  resourceKind: resKind,
+                  isConditional: false,
+                  isStateNode: false,
+                  isForEach: true,
+                  celExpressions: [],
+                  readyWhen: [],
+                  liveState: inferLiveState(item.status),
+                  namespace: ns,
+                  crName: item.metadata.name,
+                  depth: depth + 1,
+                  parentId: nodeId,
+                  detail: `${resKind} · forEach instance`,
+                });
+                if (yaml) yamlCache[leafId] = yaml;
+                edges.push({
+                  from: nodeId,
+                  to: leafId,
+                  label: "forEach",
+                  conditional: false,
+                  dashed: false,
+                });
+              }));
+            } catch {
+              // kind may not exist
+            }
+          }
+          break; // only try first namespace that works
+        }
+      }
+    }
+  }
+
+  await expand(rootRgdName, namespace, instanceName, null, 0, undefined);
+
+  return { nodes, edges, yamlCache };
+}
+
+function inferLiveState(status: Record<string, unknown> | undefined): import("./types").LiveState {
+  if (!status) return "unknown";
+  if (typeof status["entityState"] === "string") {
+    const s = status["entityState"] as string;
+    if (s === "ACTIVE" || s === "alive" || s === "ready") return "alive";
+    if (s === "DEAD" || s === "dead" || s === "error") return "error";
+    return "ok";
+  }
+  const conditions = status["conditions"] as Array<{ type: string; status: string }> | undefined;
+  if (conditions) {
+    const ready = conditions.find((c) => c.type === "Ready");
+    if (ready?.status === "True") return "alive";
+    if (ready?.status === "False") return "error";
+  }
+  return "unknown";
 }

@@ -12,6 +12,7 @@ import {
   getCurrentContext,
   detectReconciling,
   buildNodeLiveStates,
+  buildDeepInstanceGraph,
 } from "@/kro";
 
 const WATCH_INTERVAL_MS = 5000;
@@ -71,7 +72,7 @@ export function makeShowRgdGraphTool(mgr: SessionManager) {
       "Show the resource dependency graph (DAG) for a kro ResourceGraphDefinition in the browser UI. The graph shows all managed resources, state nodes, conditional edges (includeWhen), forEach fan-outs, and CEL expressions. Uses CEL reference parsing to build a true multi-depth graph.",
     args: {
       session_id: tool.schema.string().describe("session_id returned by open_krode_session"),
-      rgd_name: tool.schema.string().describe("Name of the RGD (e.g. dungeon-graph)"),
+      rgd_name: tool.schema.string().describe("Name of the RGD (e.g. my-app-graph)"),
       kubectl_context: tool.schema.string().optional().describe("kubectl context override"),
     },
     async execute(args) {
@@ -174,7 +175,7 @@ export function makeShowInstanceTool(mgr: SessionManager) {
       "Open a live observability view for a specific CR instance managed by kro. Shows the live DAG with node states (alive/reconciling/pending/locked), reconcile animation, spec/status diff, events, and child resources. Starts a 5-second polling watcher. Click any node in the browser to inspect its YAML.",
     args: {
       session_id: tool.schema.string().describe("session_id returned by open_krode_session"),
-      rgd_name: tool.schema.string().describe("RGD name (e.g. dungeon-graph)"),
+      rgd_name: tool.schema.string().describe("RGD name (e.g. my-app-graph)"),
       namespace: tool.schema.string().describe("Kubernetes namespace of the instance"),
       name: tool.schema.string().describe("Name of the CR instance"),
       kubectl_context: tool.schema.string().optional().describe("kubectl context override"),
@@ -345,6 +346,86 @@ export function makeShowYamlTool(mgr: SessionManager) {
   });
 }
 
+// ─── show_deep_instance ───────────────────────────────────────────────────────
+
+export function makeShowDeepInstanceTool(mgr: SessionManager) {
+  return tool({
+    description:
+      "Open a deep multi-level instance graph for a CR. Recursively expands forEach instances, sub-RGD CRs, and all child resources up to 4 levels deep. Every node is clickable for YAML inspection. Use this instead of show_instance when you want the full composed resource tree.",
+    args: {
+      session_id: tool.schema.string().describe("session_id returned by open_krode_session"),
+      rgd_name: tool.schema.string().describe("RGD name (e.g. my-app-graph)"),
+      namespace: tool.schema.string().describe("Kubernetes namespace of the instance"),
+      name: tool.schema.string().describe("Name of the CR instance"),
+      kubectl_context: tool.schema.string().optional().describe("kubectl context override"),
+    },
+    async execute(args) {
+      const { session_id, rgd_name, namespace, name } = args;
+      const context = resolveContext(mgr, session_id, args.kubectl_context);
+
+      const rgds = await listRGDs(context);
+      const rgd = rgds.find((r) => r.name === rgd_name);
+      if (!rgd) return `RGD "${rgd_name}" not found.`;
+
+      const instance = await getInstance(rgd.kind, rgd.group, namespace, name, context);
+      const events = await getInstanceEvents(namespace, name, context);
+      const reconciling = detectReconciling(instance);
+
+      const viewId = mgr.openView(session_id, {
+        mode: "deep-instance",
+        target: `${namespace}/${name}`,
+        kubectlContext: context,
+      });
+
+      // Start initial render with placeholder
+      mgr.updateViewData(session_id, viewId, {
+        loading: true,
+        instance,
+        events,
+        reconciling,
+        rgd: { name: rgd_name, kind: rgd.kind, group: rgd.group },
+        namespace,
+        instanceName: name,
+        kubectlContext: context,
+        lastRefresh: new Date().toISOString(),
+      });
+
+      // Build deep graph (async — can take a few seconds)
+      buildDeepInstanceGraph(rgds, rgd_name, namespace, name, context).then((deepGraph) => {
+        mgr.updateViewData(session_id, viewId, {
+          loading: false,
+          deepGraph,
+          lastRefresh: new Date().toISOString(),
+        });
+      }).catch((err: unknown) => {
+        console.error("[open-krode] deep graph build error:", err);
+        mgr.updateViewData(session_id, viewId, { loading: false, error: String(err) });
+      });
+
+      // Live watcher refreshes the instance state every 5s
+      mgr.startWatcher(session_id, viewId, WATCH_INTERVAL_MS, async () => {
+        const fresh = await getInstance(rgd.kind, rgd.group, namespace, name, context);
+        const freshEvents = await getInstanceEvents(namespace, name, context);
+        const freshReconciling = detectReconciling(fresh);
+        mgr.updateViewData(session_id, viewId, {
+          instance: fresh,
+          events: freshEvents,
+          reconciling: freshReconciling,
+          lastRefresh: new Date().toISOString(),
+        });
+      });
+
+      return [
+        `Opened deep instance view for ${namespace}/${name} (view: ${viewId})`,
+        `  RGD: ${rgd_name} | Kind: ${rgd.kind}`,
+        `  Building multi-level graph (may take a moment)…`,
+        `  Click any node in the browser to inspect its YAML`,
+        `  Auto-refreshing every ${WATCH_INTERVAL_MS / 1000}s`,
+      ].join("\n");
+    },
+  });
+}
+
 // ─── close_krode_session ──────────────────────────────────────────────────────
 
 export function makeCloseSessionTool(mgr: SessionManager) {
@@ -368,6 +449,7 @@ export function createKrodeTools(mgr: SessionManager) {
     show_rgd_graph: makeShowRgdGraphTool(mgr),
     list_rgd_instances: makeListInstancesTool(mgr),
     show_instance: makeShowInstanceTool(mgr),
+    show_deep_instance: makeShowDeepInstanceTool(mgr),
     show_instance_events: makeShowEventsTool(mgr),
     show_instance_yaml: makeShowYamlTool(mgr),
     close_krode_session: makeCloseSessionTool(mgr),

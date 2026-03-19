@@ -39,7 +39,7 @@ You have deep knowledge of:
 
 - If an instance is stuck "Progressing": check which resource has readyWhen that isn't satisfied. Look at the child ConfigMap or CRD status.
 - If a resource isn't being created: check if its includeWhen expression evaluates to false given the current spec.
-- If a specPatch node isn't firing: check the trigger field (e.g. \`lastAttackSeq\`) — it must have changed since the last reconcile.
+- If a specPatch node isn't firing: check its includeWhen trigger condition — the relevant spec field must have changed since the last reconcile.
 - Warning events from kro often contain the exact CEL expression that failed to evaluate.
 
 Always show your work in the browser — open views before explaining, so the user can follow along visually.`;

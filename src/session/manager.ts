@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { Server } from "bun";
 import { openBrowser } from "./browser";
 import { createSessionServer } from "./server";
+import { KrodeCache } from "./types";
 import type { KrodeSession, SessionId, View, ViewId, ViewMode, ViewSnapshot } from "./types";
 
 export class SessionManager {
@@ -23,6 +24,7 @@ export class SessionManager {
       views: new Map(),
       ws: null,
       watchers: new Map(),
+      cache: new KrodeCache(),
     };
     const { server, port } = await createSessionServer(sessionId, session, this.configuredPort);
     session.port = port;

@@ -68,17 +68,29 @@ export interface GraphNode {
   id: string;
   label: string;
   kind: "root" | "resource" | "state" | "schema-field";
-  resourceKind?: string; // K8s kind of the managed resource (e.g. "ConfigMap")
+  resourceKind?: string;
   isConditional: boolean;
   isStateNode: boolean;
   isForEach: boolean;
   celExpressions: string[];
   readyWhen: string[];
-  // Live instance overlay (populated by buildNodeLiveStates)
-  exists?: boolean;       // false = includeWhen blocked; render as dashed/faded outline
-  detail?: string;        // short hover tooltip line (e.g. "HP: 45 · forEach item 2/3")
+  // Full RGD resource definition (for detail panel)
+  includeWhen?: string[];
+  forEachExpr?: string;        // the forEach CEL expression
+  stateFields?: Record<string, string>; // specPatch fields
+  templateSnippet?: string;    // first ~400 chars of template YAML
+  // Live instance overlay
+  exists?: boolean;
+  detail?: string;
   liveState?: LiveState;
   liveConditions?: RGDCondition[];
+  // For deep instance graph nodes
+  namespace?: string;
+  crName?: string;
+  rgdName?: string;
+  isForEachInstance?: boolean;
+  depth?: number;
+  parentId?: string;
 }
 
 export interface GraphEdge {
@@ -127,4 +139,12 @@ export interface ChildResource {
   status?: string;
   rawYaml?: string;
   conditions?: RGDCondition[];
+}
+
+// Deep instance graph — fully resolved multi-level graph for a live CR
+export interface DeepInstanceGraph {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  // map of nodeId -> raw YAML (pre-fetched for clickable nodes)
+  yamlCache: Record<string, string>;
 }
