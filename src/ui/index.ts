@@ -1,0 +1,1 @@
+export { getHtmlBundle } from "./bundle";
