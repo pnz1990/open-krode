@@ -35,8 +35,8 @@ const KRO_CONCEPTS_DATA = {
     how: "Each iteration exposes cel.item and cel.index. The resource is named with an index suffix. Perfect for creating N replicas from a spec field.",
     example: 'forEach:\n  in: "${schema.spec.regions}"\ntemplate:\n  metadata:\n    name: "${schema.metadata.name}-${cel.item}"',
   },
-  specPatch: {
-    title: "specPatch / State Node",
+  external: {
+    title: "External Reference",
     what: "A virtual resource with no template. Instead of creating a K8s resource, it writes computed values back into the root CR status using CEL.",
     how: 'state.fields defines a map of status field path to CEL expression. kro evaluates the CEL and patches the CR status. Enables state machines in pure YAML.',
     example: 'state:\n  fields:\n    "summary.readyCount": "${size(schema.status.replicas.filter(r, r.ready == true))}"\n=> counts ready replicas and writes to status',
@@ -95,7 +95,7 @@ export function getHtmlBundle(): string {
   --meta-bg:      #1a0d33;
   --root:         #58a6ff;
   --root-bg:      #0d1f40;
-  --state-node:   #bc8cff;
+  --external-node: #8b5cf6;  /* externalRef nodes */
   --state-bg:     #150d2a;
 }
 html, body { height: 100%; background: var(--bg); color: var(--text); font-family: var(--font); font-size: 13px; }
@@ -202,7 +202,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
 .tag { font-size: 10px; padding: 1px 6px; border-radius: 3px; font-weight: 600; display: inline-block; }
 .tag-root     { background: var(--root-bg);    color: var(--root); }
 .tag-resource { background: var(--alive-bg);   color: var(--alive); }
-.tag-state    { background: var(--state-bg);   color: var(--state-node); }
+.tag-state    { background: var(--state-bg);   color: var(--external-node); }
 .tag-cond     { background: var(--pending-bg); color: var(--pending); }
 .tag-foreach  { background: #001a20;           color: var(--cyan); }
 
@@ -406,7 +406,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
             <span class="legend-item" title="Reconciling: kro is actively updating this resource right now"><span class="legend-dot" style="background:var(--reconciling)"></span>reconciling</span>
             <span class="legend-item" title="Pending: resource exists but readyWhen conditions are not yet satisfied — downstream resources are blocked"><span class="legend-dot" style="background:var(--pending)"></span>pending</span>
             <span class="legend-item" title="Locked / not-found: resource has not been created yet (includeWhen=false, or not yet reached in reconcile order)"><span class="legend-dashed"></span>locked</span>
-            <span class="legend-item" title="specPatch (state node): a virtual resource with no K8s object — writes computed CEL values back into the root CR status to implement state machines in pure YAML"><span class="legend-dot" style="background:var(--state-node)"></span>specPatch</span>
+            <span class="legend-item" title="externalRef: references an existing resource not managed by this RGD"><span class="legend-dot" style="background:var(--external-node)"></span>externalRef</span>
             <span class="legend-item" title="forEach: creates one copy of this resource for each item in a CEL list expression, named with an index suffix"><span class="legend-dot" style="background:var(--cyan)"></span>forEach</span>
             <span class="legend-item" title="includeWhen: conditional resource — kro only creates (and keeps) this resource while its CEL expression evaluates to true; deletes it when false"><span class="legend-dot" style="background:var(--yellow)"></span>includeWhen</span>
             <span class="legend-item" title="Error: resource reconciliation failed (Ready=False with error condition)"><span class="legend-dot" style="background:var(--error)"></span>error</span>
@@ -830,7 +830,7 @@ function nodeColors(n, nodeStates) {
   }
   // Static RGD-only coloring by node type
   if (n.kind === 'root')    return { border: 'var(--root)',       bg: 'var(--root-bg)',    text: 'var(--root)' };
-  if (n.isStateNode)        return { border: 'var(--state-node)', bg: 'var(--state-bg)',   text: 'var(--state-node)' };
+  if (n.isExternal || n.isExternalCollection) return { border: 'var(--external-node)', bg: 'rgba(139,92,246,0.08)', text: 'var(--external-node)' };
   if (n.isConditional)      return { border: 'var(--pending)',    bg: 'var(--pending-bg)', text: 'var(--pending)' };
   if (n.isForEach)          return { border: 'var(--cyan)',       bg: '#001a20',           text: 'var(--cyan)' };
   return { border: '#2a4a6a', bg: '#0a1420', text: 'var(--text)' };
@@ -842,7 +842,7 @@ function nodeIcon(n, liveState) {
   if (live === 'not-found')   return '○';
   if (live === 'error')       return '✕';
   if (n.kind === 'root')   return '⬡';
-  if (n.isStateNode)       return '◈';
+  if (n.isExternal || n.isExternalCollection) return '⬡';
   if (n.isForEach)         return '∀';
   if (n.isConditional)     return '?';
   return '▪';
@@ -912,8 +912,8 @@ function renderDagView(data, svgId, isInstance) {
   // Sort within each depth: root first, state nodes last, conditional in middle
   for (const row of Object.values(byDepth)) {
     row.sort((a, b) => {
-      const rankA = a.kind === 'root' ? 0 : a.isStateNode ? 3 : a.isConditional ? 2 : 1;
-      const rankB = b.kind === 'root' ? 0 : b.isStateNode ? 3 : b.isConditional ? 2 : 1;
+      const rankA = a.kind === 'root' ? 0 : (a.isExternal || a.isExternalCollection) ? 3 : a.isConditional ? 2 : 1;
+      const rankB = b.kind === 'root' ? 0 : (b.isExternal || b.isExternalCollection) ? 3 : b.isConditional ? 2 : 1;
       return rankA - rankB;
     });
   }
@@ -1238,7 +1238,7 @@ function onNodeClick(n, live, viewData) {
 
     if (match) {
       requestNodeYaml(n, match, viewData, 'live');
-    } else if (n.kind !== 'root' && n.resourceKind && instName && !n.isStateNode && !n.isForEach) {
+    } else if (n.kind !== 'root' && n.resourceKind && instName && !n.isForEach && !n.isExternal) {
       // Resource not yet in childResources — infer name from node label.
       // kro names resources as {instanceName}-{baseLabel} where baseLabel is the
       // node label with any trailing CR/CRs suffix stripped (case-insensitive).
@@ -1247,7 +1247,7 @@ function onNodeClick(n, live, viewData) {
       requestNodeYaml(n, { kind: n.resourceKind, name: inferredName, namespace: managedNs }, viewData, 'live');
     }
     // forEach nodes with no match: skip YAML (there are multiple, user should use deep view)
-  } else if (!isInstance && n.resourceKind && !n.isStateNode) {
+  } else if (!isInstance && n.resourceKind && n.kind !== 'external' && n.kind !== 'externalCollection') {
     // RGD graph view — show CEL detail; no live YAML (no instance context available)
     showNodeDetailPanel(n, viewData, 'graph');
   } else {
@@ -1359,11 +1359,12 @@ function showNodeDetailPanel(n, viewData, mode) {
   // ── Type badges ──────────────────────────────────────────────────────
   const tags = [];
   if (n.kind === 'root')  tags.push(conceptBadge('root', 'root CR'));
-  if (n.isStateNode)      tags.push(conceptBadge('specPatch', 'specPatch'));
+  if (n.isExternal)       tags.push(conceptBadge('external', 'externalRef'));
+  if (n.isExternalCollection) tags.push(conceptBadge('external', 'externalRef collection'));
   if (n.isConditional)    tags.push(conceptBadge('includeWhen', 'includeWhen'));
   if (n.isForEach)        tags.push(conceptBadge('forEach', 'forEach'));
   if (n.readyWhen?.length) tags.push(conceptBadge('readyWhen', 'readyWhen'));
-  if (!n.isStateNode && !n.isConditional && !n.isForEach && n.kind !== 'root')
+  if (!n.isExternal && !n.isExternalCollection && !n.isConditional && !n.isForEach && n.kind !== 'root')
     tags.push(conceptBadge('resource', 'managed resource'));
   if (tags.length) parts.push('<div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:10px">' + tags.join('') + '</div>');
 
@@ -1376,7 +1377,7 @@ function showNodeDetailPanel(n, viewData, mode) {
       '<span class="state-tag state-' + esc(s) + '">' + esc(s) + '</span></div>');
   }
 
-  const conceptKey = n.kind === 'root' ? 'root' : n.isStateNode ? 'specPatch' : n.isConditional ? 'includeWhen' : n.isForEach ? 'forEach' : 'resource';
+  const conceptKey = n.kind === 'root' ? 'root' : (n.isExternal || n.isExternalCollection) ? 'external' : n.isConditional ? 'includeWhen' : n.isForEach ? 'forEach' : 'resource';
   const concept = KRO_CONCEPTS[conceptKey];
   if (concept) {
     parts.push(
@@ -1392,22 +1393,13 @@ function showNodeDetailPanel(n, viewData, mode) {
   if (n.includeWhen?.length) parts.push(celSection('includeWhen — exists only when true', n.includeWhen));
   if (n.readyWhen?.length) parts.push(celSection('readyWhen — blocks downstream until true', n.readyWhen));
   if (n.forEachExpr) parts.push(celSection('forEach — iterates over', [n.forEachExpr]));
-  if (n.stateFields && Object.keys(n.stateFields).length > 0) {
-    const fieldRows = Object.entries(n.stateFields).map(([k, v]) =>
-      '<div class="state-field-row">' +
-        '<span class="state-field-key">' + esc(k) + '</span>' +
-        '<div class="cel-chip">' + esc(v.length > 200 ? v.slice(0, 197) + '…' : v) + '</div>' +
-      '</div>'
-    ).join('');
-    parts.push('<div class="detail-section"><div class="detail-section-title">State fields written to status</div>' + fieldRows + '</div>');
-  }
-  const knownCel = new Set([...(n.includeWhen||[]), ...(n.readyWhen||[]), n.forEachExpr||'', ...Object.values(n.stateFields||{})]);
+  const knownCel = new Set([...(n.includeWhen||[]), ...(n.readyWhen||[]), n.forEachExpr||'']);
   const otherCel = (n.celExpressions || []).filter(e => e && !knownCel.has(e));
   if (otherCel.length) parts.push(celSection('Other CEL expressions', otherCel));
 
   // YAML loading placeholder — only shown in live mode where a fetch is actually triggered.
   // In graph (RGD) mode there is no instance context so no YAML can be fetched.
-  if (mode === 'live' && n.resourceKind && !n.isStateNode) {
+  if (mode === 'live' && n.resourceKind && !n.isExternal && !n.isExternalCollection) {
     parts.push('<div class="detail-section yaml-section"><div class="detail-section-title">Live YAML</div><div class="inspect-loading">⟳ fetching from cluster…</div></div>');
   }
 
@@ -1437,7 +1429,7 @@ function onEdgeClick(e, fromNode, toNode, svgId) {
 
   // Relationship type badge
   const typeColors = {
-    'includeWhen': 'var(--yellow)', 'forEach': 'var(--cyan)', 'specPatch': 'var(--state-node)',
+    'includeWhen': 'var(--yellow)', 'forEach': 'var(--cyan)', 'externalRef': 'var(--external-node)',
     'dependency': 'var(--accent)',
   };
   const tc = typeColors[edgeType] || 'var(--text2)';
@@ -1479,7 +1471,7 @@ function onEdgeClick(e, fromNode, toNode, svgId) {
       ...(toNode.includeWhen || []),
       ...(toNode.readyWhen || []),
       ...(toNode.forEachExpr ? [toNode.forEachExpr] : []),
-      ...Object.values(toNode.stateFields || {}),
+      // externalRef has no CEL expressions to show here
       ...(toNode.celExpressions || []),
     ];
     const relevant = allCel.filter(expr => expr && expr.includes(fromNode?.label || ''));
@@ -1500,15 +1492,9 @@ function onEdgeClick(e, fromNode, toNode, svgId) {
     parts.push(celSection('forEach iterates over', [toNode.forEachExpr]));
   }
 
-  // For specPatch: show state fields
-  if (edgeType === 'specPatch' && toNode?.stateFields && Object.keys(toNode.stateFields).length > 0) {
-    const fieldRows = Object.entries(toNode.stateFields).map(([k, v]) =>
-      '<div class="state-field-row">' +
-        '<span class="state-field-key">' + esc(k) + '</span>' +
-        '<div class="cel-chip">' + esc(v.length > 200 ? v.slice(0, 197) + '…' : v) + '</div>' +
-      '</div>'
-    ).join('');
-    parts.push('<div class="detail-section"><div class="detail-section-title">State fields written to status</div>' + fieldRows + '</div>');
+  // For externalRef: show ref details
+  if (edgeType === 'externalRef' && toNode?.resourceKind) {
+    parts.push('<div class="detail-section"><div class="detail-section-title">References existing</div><div class="cel-chip">' + esc(toNode.resourceKind) + '</div></div>');
   }
 
   body.innerHTML = parts.join('');
@@ -1521,7 +1507,7 @@ function celSection(title, exprs) {
 
 function conceptBadge(key, label) {
   const colors = {
-    'root': 'var(--root)', 'specPatch': 'var(--state-node)', 'includeWhen': 'var(--pending)',
+    'root': 'var(--root)', 'external': 'var(--external-node)', 'includeWhen': 'var(--pending)',
     'forEach': 'var(--cyan)', 'readyWhen': 'var(--accent)', 'resource': 'var(--text2)',
   };
   const c = colors[key] || 'var(--text2)';

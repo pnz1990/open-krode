@@ -36,7 +36,7 @@ const KrodePlugin: Plugin = async () => {
       config.agent["krode"] = {
         prompt: KRODE_AGENT_PROMPT,
         description:
-          "kro RGD visualization and live instance observability. Explores ResourceGraphDefinitions (DAG), explains CEL expressions and specPatch nodes, and watches live kro instances.",
+          "kro RGD visualization and live instance observability. Explores ResourceGraphDefinitions (DAG), explains CEL expressions, forEach collections, and externalRef nodes, and watches live kro instances.",
         tools: {
           open_krode_session: true,
           show_rgd_graph: true,

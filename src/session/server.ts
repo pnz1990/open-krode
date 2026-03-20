@@ -135,7 +135,7 @@ async function handleViewRequest(
         schema: detail.spec.schema,
         nodeCount: graph.nodes.length,
         edgeCount: graph.edges.length,
-        stateNodes: graph.nodes.filter(n => n.isStateNode).map(n => n.label),
+        externalNodes: graph.nodes.filter(n => n.isExternal || n.isExternalCollection).map(n => n.label),
         conditionalNodes: graph.nodes.filter(n => n.isConditional).map(n => n.label),
         forEachNodes: graph.nodes.filter(n => n.isForEach).map(n => n.label),
         nodeStates: {},

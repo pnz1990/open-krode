@@ -97,7 +97,7 @@ export function makeShowRgdGraphTool(mgr: SessionManager) {
         schema: detail.spec.schema,
         nodeCount: graph.nodes.length,
         edgeCount: graph.edges.length,
-        stateNodes: graph.nodes.filter((n) => n.isStateNode).map((n) => n.label),
+        externalNodes: graph.nodes.filter((n) => n.isExternal || n.isExternalCollection).map((n) => n.label),
         conditionalNodes: graph.nodes.filter((n) => n.isConditional).map((n) => n.label),
         forEachNodes: graph.nodes.filter((n) => n.isForEach).map((n) => n.label),
         // RGD-only graph has no live instance data
@@ -105,14 +105,14 @@ export function makeShowRgdGraphTool(mgr: SessionManager) {
         reconciling: false,
       });
 
-      const stateNodesList = graph.nodes.filter((n) => n.isStateNode).map((n) => n.label);
+      const externalNodesList = graph.nodes.filter((n) => n.isExternal || n.isExternalCollection).map((n) => n.label);
       const conditionalList = graph.nodes.filter((n) => n.isConditional).map((n) => n.label);
 
       return [
         `Opened RGD graph for "${rgd_name}" (view: ${viewId})`,
         `  Nodes: ${graph.nodes.length} | Edges: ${graph.edges.length}`,
         `  Kind: ${detail.spec.schema.kind} (group: ${detail.spec.schema.group})`,
-        `  State nodes (specPatch): ${stateNodesList.length > 0 ? stateNodesList.join(", ") : "none"}`,
+        `  External refs: ${externalNodesList.length > 0 ? externalNodesList.join(", ") : "none"}`,
         `  Conditional (includeWhen): ${conditionalList.length > 0 ? conditionalList.join(", ") : "none"}`,
         `  forEach nodes: ${graph.nodes.filter((n) => n.isForEach).map((n) => n.label).join(", ") || "none"}`,
       ].join("\n");

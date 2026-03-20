@@ -160,8 +160,9 @@ export function buildRGDGraph(detail: RGDDetail): RGDGraph {
     kind: "root",
     resourceKind: detail.spec.schema.kind,
     isConditional: false,
-    isStateNode: false,
     isForEach: false,
+    isExternal: false,
+    isExternalCollection: false,
     celExpressions: [],
     readyWhen: [],
     exists: true,
@@ -179,21 +180,27 @@ export function buildRGDGraph(detail: RGDDetail): RGDGraph {
     const resKind =
       typeof template?.kind === "string" ? template.kind : r.id;
 
-    const isState = !!r.state;
     const isConditional = (r.includeWhen ?? []).length > 0;
     const isForEach = !!r.forEach;
+    const isExternal = !!r.externalRef;
+    const isExternalCollection = isExternal && !!((r.externalRef as Record<string, unknown>)?.metadata as Record<string, unknown>)?.selector;
 
     const celExprs: string[] = [
       ...(r.includeWhen ?? []),
       ...(r.readyWhen ?? []),
-      ...Object.values(r.state?.fields ?? {}),
     ];
 
-    // Extract forEach expression string
+    // Extract forEach expression string (upstream: ForEachDimension is map[string]string)
     let forEachExpr: string | undefined;
     if (r.forEach) {
-      const fe = r.forEach as Record<string, unknown>;
-      forEachExpr = typeof fe.in === "string" ? fe.in : JSON.stringify(fe).slice(0, 120);
+      const fe = r.forEach as Record<string, string>[];
+      if (Array.isArray(fe) && fe.length > 0) {
+        const firstDim = fe[0];
+        if (firstDim) {
+          const val = Object.values(firstDim)[0];
+          if (val) forEachExpr = val;
+        }
+      }
     }
 
     // Build a detail hint from CEL metadata
@@ -201,24 +208,31 @@ export function buildRGDGraph(detail: RGDDetail): RGDGraph {
     if (isConditional) parts.push(`includeWhen: ${(r.includeWhen ?? []).join("; ").slice(0, 60)}`);
     if (r.readyWhen?.length) parts.push(`readyWhen: ${r.readyWhen[0]!.slice(0, 60)}`);
     if (isForEach) parts.push("forEach fan-out");
-    if (isState) parts.push(`specPatch → ${r.state?.storeName ?? "?"}`);
+    if (isExternal) parts.push(`externalRef: ${isExternalCollection ? "collection" : "single"}`);
 
     // Template snippet (first ~400 chars of YAML-like representation)
     const tmplStr = r.template ? JSON.stringify(r.template, null, 2).slice(0, 500) : undefined;
 
+    // Classify node kind using upstream kro NodeType constants
+    let nodeKind: GraphNode["kind"];
+    if (isExternalCollection) nodeKind = "externalCollection";
+    else if (isExternal) nodeKind = "external";
+    else if (isForEach) nodeKind = "collection";
+    else nodeKind = "resource";
+
     nodes.push({
       id: nodeId,
       label: r.id,
-      kind: isState ? "state" : "resource",
+      kind: nodeKind,
       resourceKind: resKind,
       isConditional,
-      isStateNode: isState,
       isForEach,
+      isExternal,
+      isExternalCollection,
       celExpressions: celExprs,
       readyWhen: r.readyWhen ?? [],
       includeWhen: r.includeWhen,
       forEachExpr,
-      stateFields: r.state?.fields,
       templateSnippet: tmplStr,
       exists: true,
       detail: parts.join(" · ") || resKind,
@@ -238,7 +252,6 @@ export function buildRGDGraph(detail: RGDDetail): RGDGraph {
     const celJson = JSON.stringify([
       ...(r.includeWhen ?? []),
       ...(r.readyWhen ?? []),
-      ...Object.values(r.state?.fields ?? {}),
     ]);
     const allJson = templateJson + celJson;
 
@@ -262,7 +275,7 @@ export function buildRGDGraph(detail: RGDDetail): RGDGraph {
         to: nodeId,
         conditional: isConditional,
         dashed: isConditional,
-        label: r.state ? "specPatch" : r.forEach ? "forEach" : isConditional ? "includeWhen" : undefined,
+        label: r.forEach ? "forEach" : isConditional ? "includeWhen" : r.externalRef ? "externalRef" : undefined,
       });
     }
   }
@@ -496,8 +509,8 @@ export function buildNodeLiveStates(
       continue;
     }
 
-    if (node.isStateNode) {
-      // specPatch state nodes: reconciling when the instance is reconciling
+    if (node.isForEach || node.isExternal) {
+      // forEach/external nodes: reconciling when the instance is reconciling
       states[node.id] = reconciling ? "reconciling" : "ok";
       continue;
     }
@@ -545,7 +558,7 @@ function relativeAge(timestamp: string): string {
 
 function inferStatus(status: Record<string, unknown> | undefined): string {
   if (!status) return "unknown";
-  // kro pattern: ConfigMaps have entityState field set via specPatch
+  // kro pattern: check instance-level state via conditions
   if (typeof status["entityState"] === "string") return status["entityState"] as string;
   // generic ready condition
   const conditions = status["conditions"] as Array<{ type: string; status: string }> | undefined;
@@ -664,8 +677,9 @@ export async function buildDeepInstanceGraph(
       kind: isRoot ? "root" : "resource",
       resourceKind: rgd.kind,
       isConditional: false,
-      isStateNode: false,
       isForEach: false,
+      isExternal: false,
+      isExternalCollection: false,
       celExpressions: [],
       readyWhen: [],
       liveState,
@@ -764,8 +778,9 @@ export async function buildDeepInstanceGraph(
                   kind: "resource",
                   resourceKind: resKind,
                   isConditional,
-                  isStateNode: false,
                   isForEach,
+                  isExternal: false,
+                  isExternalCollection: false,
                   celExpressions: [],
                   readyWhen: r.readyWhen ?? [],
                   liveState: "alive",
@@ -808,8 +823,9 @@ export async function buildDeepInstanceGraph(
                   kind: "resource",
                   resourceKind: resKind,
                   isConditional: false,
-                  isStateNode: false,
                   isForEach: true,
+                  isExternal: false,
+                  isExternalCollection: false,
                   celExpressions: [],
                   readyWhen: [],
                   liveState: inferLiveState(item.status),

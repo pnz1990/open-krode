@@ -41,10 +41,11 @@ export interface RGDResource {
   includeWhen?: string[];
   readyWhen?: string[];
   forEach?: unknown;
-  // state node (specPatch / stateWrite)
-  state?: {
-    storeName: string;
-    fields: Record<string, string>;
+  // externalRef: references an existing resource (single or by selector)
+  externalRef?: {
+    apiVersion: string;
+    kind: string;
+    metadata: { name?: string; namespace?: string; selector?: unknown };
   };
   template?: unknown;
 }
@@ -67,18 +68,18 @@ export type LiveState =
 export interface GraphNode {
   id: string;
   label: string;
-  kind: "root" | "resource" | "state" | "schema-field";
+  // Upstream kro node types (pkg/graph/node.go NodeType constants)
+  kind: "root" | "resource" | "collection" | "external" | "externalCollection";
   resourceKind?: string;
-  isConditional: boolean;
-  isStateNode: boolean;
-  isForEach: boolean;
+  isConditional: boolean;   // has includeWhen set (modifier, not a separate type)
+  isForEach: boolean;       // NodeTypeCollection
+  isExternal: boolean;      // NodeTypeExternal or NodeTypeExternalCollection
+  isExternalCollection: boolean; // NodeTypeExternalCollection (selector-based)
   celExpressions: string[];
   readyWhen: string[];
-  // Full RGD resource definition (for detail panel)
   includeWhen?: string[];
-  forEachExpr?: string;        // the forEach CEL expression
-  stateFields?: Record<string, string>; // specPatch fields
-  templateSnippet?: string;    // first ~400 chars of template YAML
+  forEachExpr?: string;     // forEach dimension CEL expression
+  templateSnippet?: string; // first ~400 chars of template YAML
   // Live instance overlay
   exists?: boolean;
   detail?: string;
