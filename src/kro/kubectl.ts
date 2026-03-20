@@ -18,6 +18,32 @@ import type {
 const exec = promisify(execCb);
 
 const KRO_GROUP = "kro.run";
+
+// ─── kubectl exec timeout ────────────────────────────────────────────────────
+// Without a timeout, a hung kubectl command keeps accumulating across every
+// watcher tick, eventually creating dozens of zombie subprocesses.
+const KUBECTL_TIMEOUT_MS = 15_000; // 15s
+
+// ─── Simple concurrency limiter ───────────────────────────────────────────────
+// Prevents unbounded parallel kubectl subprocesses in buildDeepInstanceGraph.
+function makeLimiter(maxConcurrent: number) {
+  let running = 0;
+  const queue: Array<() => void> = [];
+  return function limit<T>(fn: () => Promise<T>): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const run = () => {
+        running++;
+        fn().then(resolve, reject).finally(() => {
+          running--;
+          if (queue.length > 0) queue.shift()!();
+        });
+      };
+      if (running < maxConcurrent) run();
+      else queue.push(run);
+    });
+  };
+}
+
 const RGD_RESOURCE = "resourcegraphdefinitions";
 
 // ─── kubectl helpers ──────────────────────────────────────────────────────────
@@ -28,7 +54,7 @@ function kubectl(args: string, context?: string): string {
 }
 
 async function run(cmd: string): Promise<string> {
-  const { stdout } = await exec(cmd, { maxBuffer: 10 * 1024 * 1024 });
+  const { stdout } = await exec(cmd, { maxBuffer: 10 * 1024 * 1024, timeout: KUBECTL_TIMEOUT_MS });
   return stdout.trim();
 }
 
@@ -575,9 +601,14 @@ export async function buildDeepInstanceGraph(
   const edges: import("./types").GraphEdge[] = [];
   const yamlCache: Record<string, string> = {};
 
+  // Limit concurrent kubectl subprocesses — without this, a large RGD with
+  // many resources at 4 depth levels can spawn hundreds of parallel processes.
+  const limit = makeLimiter(6);
+
   // Allow callers to inject cached versions of these functions
   const _getRGDDetail = resolvers?.getRGDDetail ?? getRGDDetail;
-  const _getResourceYaml = resolvers?.getResourceYaml ?? getResourceYaml;
+  const _getResourceYaml = (ns: string, kind: string, n: string, ctx?: string) =>
+    limit(() => (resolvers?.getResourceYaml ?? getResourceYaml)(ns, kind, n, ctx));
 
   // Build a map of kind → RGD for cross-RGD lookup
   const kindToRgd = new Map<string, RGDSummary>();

@@ -15,7 +15,7 @@
     }
   },
   "scripts": {
-    "build": "echo \"export const BUILD_TIME = '$(date -u '+%Y-%m-%d %H:%M UTC')';\" > src/build-stamp.ts && bun build src/index.ts --outdir dist --target bun --format esm && tsc --emitDeclarationOnly && bun scripts/write-ui-html.ts && cp logo.png dist/logo.png && cp favicon.icon.png dist/favicon.png",
+    "build": "echo \"export const BUILD_TIME = '$(date -u '+%Y-%m-%d %H:%M UTC')';\" > src/build-stamp.ts && bun build src/index.ts --outdir dist --target bun --format esm && tsc --emitDeclarationOnly && bun scripts/write-ui-html.ts && cp small-logo.png dist/logo.png && cp favicon.icon.png dist/favicon.png",
     "install:plugin": "bun run build && mkdir -p ~/.cache/opencode/node_modules/open-krode/dist && cp dist/index.js ~/.cache/opencode/node_modules/open-krode/dist/index.js && cp dist/ui.html ~/.cache/opencode/node_modules/open-krode/dist/ui.html && cp dist/logo.png ~/.cache/opencode/node_modules/open-krode/dist/logo.png && cp dist/favicon.png ~/.cache/opencode/node_modules/open-krode/dist/favicon.png && cp package.json ~/.cache/opencode/node_modules/open-krode/package.json",
     "clean": "rm -rf dist",
     "typecheck": "tsc --noEmit",

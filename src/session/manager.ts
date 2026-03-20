@@ -9,6 +9,11 @@ export class SessionManager {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private sessions = new Map<SessionId, { session: KrodeSession; server: Server<any> }>();
   private configuredPort?: number;
+  // Inactivity timeout: auto-end a session if the WS has been disconnected
+  // for longer than this. Prevents zombie sessions/watchers when the agent
+  // process crashes without calling close_krode_session.
+  private static readonly SESSION_IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 min
+  private idleTimers = new Map<SessionId, ReturnType<typeof setTimeout>>();
 
   constructor(opts?: { port?: number }) {
     this.configuredPort = opts?.port;
@@ -26,7 +31,10 @@ export class SessionManager {
       watchers: new Map(),
       cache: new KrodeCache(),
     };
-    const { server, port } = await createSessionServer(sessionId, session, this.configuredPort);
+    const { server, port } = await createSessionServer(sessionId, session, this.configuredPort, {
+      onConnected: (id) => this.markConnected(id),
+      onDisconnected: (id) => this.markDisconnected(id),
+    });
     session.port = port;
 
     this.sessions.set(sessionId, { session, server });
@@ -40,6 +48,10 @@ export class SessionManager {
   async endSession(sessionId: SessionId): Promise<void> {
     const entry = this.sessions.get(sessionId);
     if (!entry) return;
+
+    // cancel idle timer if pending
+    const idleTimer = this.idleTimers.get(sessionId);
+    if (idleTimer) { clearTimeout(idleTimer); this.idleTimers.delete(sessionId); }
 
     // stop all watchers
     for (const watcher of entry.session.watchers.values()) {
@@ -57,6 +69,22 @@ export class SessionManager {
 
     entry.server.stop(true);
     this.sessions.delete(sessionId);
+  }
+
+  /** Call when a browser WS connection opens — cancels the idle timer. */
+  markConnected(sessionId: SessionId): void {
+    const timer = this.idleTimers.get(sessionId);
+    if (timer) { clearTimeout(timer); this.idleTimers.delete(sessionId); }
+  }
+
+  /** Call when the browser WS connection closes — starts the idle timer. */
+  markDisconnected(sessionId: SessionId): void {
+    if (this.idleTimers.has(sessionId)) return; // already armed
+    const timer = setTimeout(() => {
+      console.warn(`[open-krode] session ${sessionId} idle for ${SessionManager.SESSION_IDLE_TIMEOUT_MS / 60000}m — auto-closing`);
+      this.endSession(sessionId).catch(() => {});
+    }, SessionManager.SESSION_IDLE_TIMEOUT_MS);
+    this.idleTimers.set(sessionId, timer);
   }
 
   getSession(sessionId: SessionId): KrodeSession | undefined {
@@ -81,6 +109,26 @@ export class SessionManager {
     session.views.set(viewId, view);
     this.sendToSession(session, { type: "view.open", view: viewSnap(view) });
     return viewId;
+  }
+
+  /**
+   * Returns the viewId of an existing view matching mode+target, or opens a
+   * new one. Use this for non-watcher views (events, yaml, rgd-graph) to
+   * prevent session.views from growing without bound when the same tool is
+   * called repeatedly for the same target.
+   */
+  getOrOpenView(
+    sessionId: SessionId,
+    opts: { mode: ViewMode; target: string; kubectlContext?: string },
+  ): ViewId {
+    const session = this.getSession(sessionId);
+    if (!session) throw new Error(`Session not found: ${sessionId}`);
+
+    const existing = [...session.views.values()].find(
+      v => v.mode === opts.mode && v.target === opts.target,
+    );
+    if (existing) return existing.id;
+    return this.openView(sessionId, opts);
   }
 
   updateViewData(

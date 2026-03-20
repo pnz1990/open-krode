@@ -224,6 +224,15 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
 .instance-body { display: flex; flex: 1; overflow: hidden; }
 .instance-left { flex: 1; overflow-y: auto; padding: 14px 16px; }
 .instance-right { width: 300px; border-left: 1px solid var(--border); overflow-y: auto; padding: 12px; }
+
+/* ── instance detail panel (YAML side panel in live view) ──────────── */
+#instance-detail-panel { width: 380px; border-left: 1px solid var(--border); background: var(--bg2);
+  display: flex; flex-direction: column; overflow: hidden; flex-shrink: 0; transition: width 0.2s; }
+#instance-detail-panel.hidden { display: none; }
+/* instance-dag-body: fixed height DAG strip + optional side panel, above the spec/conditions area */
+#instance-dag-body { display: flex; flex-shrink: 0; overflow: hidden;
+  height: 340px; border-bottom: 1px solid var(--border); }
+#instance-dag-wrap { flex: 1; overflow-x: auto; overflow-y: hidden; background: var(--bg); }
 .section-title { font-size: 10px; text-transform: uppercase; letter-spacing: 1px;
   color: var(--text2); margin-bottom: 8px; padding-bottom: 4px; border-bottom: 1px solid var(--border); }
 .kv-grid { display: grid; grid-template-columns: 140px 1fr; gap: 2px 8px; font-size: 12px; margin-bottom: 6px; }
@@ -429,9 +438,18 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
           <span>kro is reconciling this instance</span>
           <span style="margin-left:auto;font-size:10px;opacity:0.7">nodes pulsing = actively updating</span>
         </div>
-        <!-- DAG embedded in instance view -->
-        <div class="instance-dag-wrap" id="instance-dag-wrap">
-          <svg id="instance-dag-svg" xmlns="http://www.w3.org/2000/svg" style="display:block"></svg>
+        <!-- DAG + side detail panel, side by side -->
+        <div id="instance-dag-body">
+          <div id="instance-dag-wrap">
+            <svg id="instance-dag-svg" xmlns="http://www.w3.org/2000/svg" style="display:block"></svg>
+          </div>
+          <div id="instance-detail-panel" class="hidden">
+            <div class="detail-header">
+              <span id="instance-detail-title">Node</span>
+              <span class="detail-close" id="instance-detail-close">✕</span>
+            </div>
+            <div class="detail-body" id="instance-detail-body"></div>
+          </div>
         </div>
         <div class="instance-body">
           <div class="instance-left" id="instance-left"></div>
@@ -838,10 +856,12 @@ function renderDagView(data, svgId, isInstance) {
   }
   const { graph, rgdName, nodeStates, reconciling } = data;
 
-  // Close stale detail panel whenever the main DAG is re-rendered
+  // Close stale detail panel only when switching views (not on live refresh)
   if (svgId === 'dag-svg') {
     document.getElementById('detail-panel').classList.add('hidden');
   }
+  // Note: instance-detail-panel is NOT reset here — renderDagView is called on
+  // every 5s watcher tick for the live view and we don't want to close the panel.
 
   // Update title (only for main DAG panel)
   if (svgId === 'dag-svg') {
@@ -1192,31 +1212,51 @@ const KRO_CONCEPTS = ${KRO_CONCEPTS_JSON};
 
 // ─── Node click handler ────────────────────────────────────────────────
 function onNodeClick(n, live, viewData) {
-  const isInstance = !!(viewData && viewData.nodeStates);
+  // isInstance: true only for live instance views (have an actual instance object)
+  const isInstance = !!(viewData && viewData.instance);
   if (isInstance && live !== 'not-found') {
     const childResources = viewData.childResources || [];
     const nodeKind = (n.resourceKind || n.label).toLowerCase();
-    let match = childResources.find(cr =>
+    const instName = viewData.instanceName || (viewData.instance && viewData.instance.name) || '';
+    const instNs = (viewData.instance && viewData.instance.namespace) || viewData.namespace || 'default';
+    // The managed namespace is typically the instance name (kro creates a NS matching the CR name)
+    const managedNs = instNs === 'default' ? instName : instNs;
+
+    // Find ALL child resources whose kind matches this node
+    const kindMatches = childResources.filter(cr =>
       cr.kind.toLowerCase() === nodeKind || cr.kind.toLowerCase() === nodeKind + 's'
     );
-    if (!match && n.kind === 'root' && viewData.instance) {
-      match = {
-        kind: viewData.instance.kind,
-        name: viewData.instance.name,
-        namespace: viewData.instance.namespace,
-      };
-    }
+
+    // Pick the best match: prefer "alive"/"ready" resources; fall back to first
+    const match = kindMatches.find(cr => cr.status === 'alive' || cr.status === 'ready')
+      || kindMatches[0]
+      || (n.kind === 'root' && viewData.instance
+          ? { kind: viewData.instance.kind, name: viewData.instance.name, namespace: viewData.instance.namespace }
+          : null);
+
+    showNodeDetailPanel(n, viewData, 'live');
+
     if (match) {
-      requestNodeYaml(n, match, viewData);
+      requestNodeYaml(n, match, viewData, 'live');
+    } else if (n.kind !== 'root' && n.resourceKind && instName && !n.isStateNode && !n.isForEach) {
+      // Resource not yet in childResources — infer name from node label.
+      // kro names resources as {instanceName}-{baseLabel} where baseLabel is the
+      // node label with any trailing CR/CRs suffix stripped (case-insensitive).
+      const baseLabel = n.label.replace(/CRs?$/i, '').toLowerCase();
+      const inferredName = instName + '-' + baseLabel;
+      requestNodeYaml(n, { kind: n.resourceKind, name: inferredName, namespace: managedNs }, viewData, 'live');
     }
-    showNodeDetailCEL(n);  // always show CEL panel, even in instance mode
+    // forEach nodes with no match: skip YAML (there are multiple, user should use deep view)
+  } else if (!isInstance && n.resourceKind && !n.isStateNode) {
+    // RGD graph view — show CEL detail; no live YAML (no instance context available)
+    showNodeDetailPanel(n, viewData, 'graph');
   } else {
-    showNodeDetailCEL(n);
+    showNodeDetailPanel(n, viewData, 'graph');
   }
 }
 
-function requestNodeYaml(n, resource, viewData) {
-  pendingInspect = { nodeId: n.id, mode: 'graph' };
+function requestNodeYaml(n, resource, viewData, mode) {
+  pendingInspect = { nodeId: n.id, mode: mode || 'graph' };
   if (ws && ws.readyState === 1) {
     ws.send(JSON.stringify({
       type: 'node.inspect',
@@ -1231,8 +1271,9 @@ function requestNodeYaml(n, resource, viewData) {
 
 function handleNodeYaml(msg) {
   // Route to the correct panel depending on where the inspect was triggered.
-  // pendingInspect carries { nodeId, mode } so we know which panel to update.
-  const isDeepMode = pendingInspect?.mode === 'deep';
+  const mode = pendingInspect?.mode || 'graph';
+  const isDeepMode = mode === 'deep';
+  pendingInspect = null;
 
   if (isDeepMode) {
     // Deep instance panel: show YAML in deep-info-body
@@ -1256,47 +1297,63 @@ function handleNodeYaml(msg) {
     }
     body.appendChild(yamlSection);
   } else {
-    // RGD graph / instance panel: append YAML to #detail-panel body
-    const panel = document.getElementById('detail-panel');
+    // RGD graph or live instance panel: replace the yaml-section placeholder
+    const { panel, bodyEl } = (mode === 'live')
+      ? { panel: document.getElementById('instance-detail-panel'), bodyEl: document.getElementById('instance-detail-body') }
+      : { panel: document.getElementById('detail-panel'), bodyEl: document.getElementById('detail-body') };
     panel.classList.remove('hidden');
-    const body = document.getElementById('detail-body');
-    const existingYaml = body.querySelector('.yaml-section');
-    if (existingYaml) existingYaml.remove();
+    const existingYaml = bodyEl.querySelector('.yaml-section');
     const yamlSection = document.createElement('div');
-    yamlSection.className = 'yaml-section';
+    yamlSection.className = 'yaml-section detail-section';
     if (!msg.yaml) {
       yamlSection.innerHTML =
-        '<div class="detail-section-title" style="margin-top:12px">Live YAML</div>' +
+        '<div class="detail-section-title">Live YAML</div>' +
         '<div class="inspect-loading">Resource not found in cluster.</div>' +
         (msg.kubectlCmd ? '<div class="kubectl-cmd" title="click to copy" onclick="navigator.clipboard&&navigator.clipboard.writeText(' + JSON.stringify(msg.kubectlCmd) + ')">' + esc(msg.kubectlCmd) + '</div>' : '');
     } else {
       yamlSection.innerHTML =
-        '<div class="detail-section-title" style="margin-top:12px">Live YAML</div>' +
+        '<div class="detail-section-title">Live YAML</div>' +
         '<div class="kubectl-cmd" title="click to copy" onclick="navigator.clipboard&&navigator.clipboard.writeText(' + JSON.stringify(msg.kubectlCmd) + ')">' + esc(msg.kubectlCmd) + '</div>' +
         '<pre class="yaml-inspect">' + highlightYaml(msg.yaml) + '</pre>';
     }
-    body.appendChild(yamlSection);
+    if (existingYaml) existingYaml.replaceWith(yamlSection);
+    else bodyEl.appendChild(yamlSection);
   }
-  pendingInspect = null;
 }
 
 function showDetailLoading(label, subtitle) {
-  const panel = document.getElementById('detail-panel');
+  const { panel, titleEl, bodyEl } = getDetailEls('graph');
   panel.classList.remove('hidden');
-  document.getElementById('detail-title').textContent = label;
-  const existingYaml = document.getElementById('detail-body').querySelector('.yaml-section');
+  titleEl.textContent = label;
+  const existingYaml = bodyEl.querySelector('.yaml-section');
   if (!existingYaml) {
-    document.getElementById('detail-body').innerHTML =
+    bodyEl.innerHTML =
       '<div class="inspect-loading">⟳ fetching ' + esc(subtitle) + ' from cluster…</div>';
   }
 }
 
-// ─── CEL/concept detail panel ─────────────────────────────────────────
-function showNodeDetailCEL(n) {
-  const panel = document.getElementById('detail-panel');
+// ─── Panel routing helpers ─────────────────────────────────────────────
+// Returns { panel, titleEl, bodyEl } for the correct side panel based on mode.
+function getDetailEls(mode) {
+  if (mode === 'live') {
+    return {
+      panel: document.getElementById('instance-detail-panel'),
+      titleEl: document.getElementById('instance-detail-title'),
+      bodyEl: document.getElementById('instance-detail-body'),
+    };
+  }
+  return {
+    panel: document.getElementById('detail-panel'),
+    titleEl: document.getElementById('detail-title'),
+    bodyEl: document.getElementById('detail-body'),
+  };
+}
+
+// Show node metadata (CEL, tags, concept) in the appropriate side panel.
+function showNodeDetailPanel(n, viewData, mode) {
+  const { panel, titleEl, bodyEl } = getDetailEls(mode || 'graph');
   panel.classList.remove('hidden');
-  document.getElementById('detail-title').textContent = n.label;
-  const body = document.getElementById('detail-body');
+  titleEl.textContent = n.label;
   const parts = [];
 
   // ── Type badges ──────────────────────────────────────────────────────
@@ -1310,10 +1367,15 @@ function showNodeDetailCEL(n) {
     tags.push(conceptBadge('resource', 'managed resource'));
   if (tags.length) parts.push('<div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:10px">' + tags.join('') + '</div>');
 
-  // ── K8s Kind ─────────────────────────────────────────────────────────
   if (n.resourceKind) parts.push(detailRow('Kind', n.resourceKind));
 
-  // ── Concept explanation ───────────────────────────────────────────────
+  // Live state badge (only in live mode) — use innerHTML-safe insertion
+  if (mode === 'live' && viewData && viewData.nodeStates && viewData.nodeStates[n.id]) {
+    const s = viewData.nodeStates[n.id];
+    parts.push('<div class="detail-section"><div class="detail-section-title">STATE</div>' +
+      '<span class="state-tag state-' + esc(s) + '">' + esc(s) + '</span></div>');
+  }
+
   const conceptKey = n.kind === 'root' ? 'root' : n.isStateNode ? 'specPatch' : n.isConditional ? 'includeWhen' : n.isForEach ? 'forEach' : 'resource';
   const concept = KRO_CONCEPTS[conceptKey];
   if (concept) {
@@ -1327,22 +1389,9 @@ function showNodeDetailCEL(n) {
     );
   }
 
-  // ── includeWhen expressions ───────────────────────────────────────────
-  if (n.includeWhen?.length) {
-    parts.push(celSection('includeWhen — exists only when true', n.includeWhen));
-  }
-
-  // ── readyWhen expressions ─────────────────────────────────────────────
-  if (n.readyWhen?.length) {
-    parts.push(celSection('readyWhen — blocks downstream until true', n.readyWhen));
-  }
-
-  // ── forEach expression ────────────────────────────────────────────────
-  if (n.forEachExpr) {
-    parts.push(celSection('forEach — iterates over', [n.forEachExpr]));
-  }
-
-  // ── specPatch state fields ────────────────────────────────────────────
+  if (n.includeWhen?.length) parts.push(celSection('includeWhen — exists only when true', n.includeWhen));
+  if (n.readyWhen?.length) parts.push(celSection('readyWhen — blocks downstream until true', n.readyWhen));
+  if (n.forEachExpr) parts.push(celSection('forEach — iterates over', [n.forEachExpr]));
   if (n.stateFields && Object.keys(n.stateFields).length > 0) {
     const fieldRows = Object.entries(n.stateFields).map(([k, v]) =>
       '<div class="state-field-row">' +
@@ -1352,15 +1401,22 @@ function showNodeDetailCEL(n) {
     ).join('');
     parts.push('<div class="detail-section"><div class="detail-section-title">State fields written to status</div>' + fieldRows + '</div>');
   }
-
-  // ── Other CEL (fallback) ──────────────────────────────────────────────
   const knownCel = new Set([...(n.includeWhen||[]), ...(n.readyWhen||[]), n.forEachExpr||'', ...Object.values(n.stateFields||{})]);
   const otherCel = (n.celExpressions || []).filter(e => e && !knownCel.has(e));
-  if (otherCel.length) {
-    parts.push(celSection('Other CEL expressions', otherCel));
+  if (otherCel.length) parts.push(celSection('Other CEL expressions', otherCel));
+
+  // YAML loading placeholder — only shown in live mode where a fetch is actually triggered.
+  // In graph (RGD) mode there is no instance context so no YAML can be fetched.
+  if (mode === 'live' && n.resourceKind && !n.isStateNode) {
+    parts.push('<div class="detail-section yaml-section"><div class="detail-section-title">Live YAML</div><div class="inspect-loading">⟳ fetching from cluster…</div></div>');
   }
 
-  body.innerHTML = parts.join('');
+  bodyEl.innerHTML = parts.join('');
+}
+
+// ─── CEL/concept detail panel ─────────────────────────────────────────
+function showNodeDetailCEL(n) {
+  showNodeDetailPanel(n, null, 'graph');
 }
 
 // ─── Edge click handler ────────────────────────────────────────────────
@@ -1484,6 +1540,12 @@ function detailRow(label, value) {
     '<div style="font-size:12px;color:var(--text)">' + esc(String(value)) + '</div></div>';
 }
 
+document.getElementById('detail-close').addEventListener('click', () => {
+  document.getElementById('detail-panel').classList.add('hidden');
+});
+document.getElementById('instance-detail-close').addEventListener('click', () => {
+  document.getElementById('instance-detail-panel').classList.add('hidden');
+});
 document.getElementById('deep-info-close').addEventListener('click', () => {
   document.getElementById('deep-info-panel').classList.add('hidden');
 });
@@ -1509,9 +1571,6 @@ function renderInstance(data) {
   // Embedded DAG
   if (graph) {
     renderDagView(data, 'instance-dag-svg', true);
-    document.getElementById('instance-dag-wrap').style.display = 'block';
-  } else {
-    document.getElementById('instance-dag-wrap').style.display = 'none';
   }
 
   // Left: spec + conditions + status + child resources

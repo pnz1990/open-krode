@@ -76,15 +76,21 @@ async function cachedGetResourceYaml(cache: KrodeCache, namespace: string, kind:
   const hit = cache.get<string>(key);
   if (hit !== undefined) return hit;
   const result = await getResourceYaml(namespace, kind, name, context);
-  cache.set(key, result, TTL_YAML);
+  // Only cache successful fetches — don't cache empty/not-found so a retry works
+  if (result) cache.set(key, result, TTL_YAML);
   return result;
 }
 
 // ─── Background cache warm-up ─────────────────────────────────────────────────
 // Called once per WS connect. Fetches the RGD list + all RGD details in
 // parallel so they're ready before the user clicks anything.
+// Debounced: only one warm-up runs at a time per session (tracked on the cache).
 
 async function warmCache(cache: KrodeCache, context?: string): Promise<void> {
+  // Avoid concurrent warm-ups (e.g. multiple rapid reconnects / duplicate tabs)
+  const lockKey = `__warming__:${context ?? ""}`;
+  if (cache.get<boolean>(lockKey)) return; // already in flight
+  cache.set(lockKey, true, 60_000); // hold lock for up to 60s
   try {
     const rgds = await cachedListRGDs(cache, context);
     // Fetch all RGD details in parallel — they're small and static
@@ -92,6 +98,9 @@ async function warmCache(cache: KrodeCache, context?: string): Promise<void> {
     console.log(`[open-krode] cache warmed: ${rgds.length} RGDs`);
   } catch (e) {
     console.warn("[open-krode] cache warm-up failed:", e);
+  } finally {
+    // Release lock so a future reconnect can re-warm if needed
+    cache.delete(lockKey);
   }
 }
 
@@ -164,7 +173,14 @@ async function handleViewRequest(
     const name = payload.name as string;
     if (!rgdName || !namespace || !name) return;
 
-    const viewId = `view_${Math.random().toString(36).slice(2, 10)}`;
+    // Use a stable viewId based on target so re-opens replace the previous view
+    // rather than leaking an orphaned watcher for the old random viewId.
+    const viewId = `view_deep_${namespace}_${name}`.replace(/[^a-z0-9_]/gi, "_");
+
+    // Stop any existing watcher for this view before starting a new async build
+    const existingWatcher = session.watchers.get(viewId);
+    if (existingWatcher) { clearInterval(existingWatcher); session.watchers.delete(viewId); }
+
     const view = { id: viewId, mode: "deep-instance" as const, target: `${namespace}/${name}`, kubectlContext: context, data: {} as Record<string, unknown> };
     session.views.set(viewId, view);
     const initialData = { loading: true, rgd: { name: rgdName }, namespace, instanceName: name };
@@ -173,16 +189,25 @@ async function handleViewRequest(
 
     // Use cached RGD list so buildDeepInstanceGraph doesn't re-fetch it
     cachedListRGDs(cache, context).then(async rgds => {
+      // Check if view was closed while we were waiting for the RGD list
+      if (!session.views.has(viewId)) return;
+
       const deepGraph = await buildDeepInstanceGraph(rgds, rgdName, namespace, name, context, {
         getRGDDetail: (n, ctx) => cachedGetRGDDetail(cache, n, ctx),
         getResourceYaml: (ns, kind, n, ctx) => cachedGetResourceYaml(cache, ns, kind, n, ctx),
       });
+
+      // Check again — view may have been closed during the (potentially long) build
+      if (!session.views.has(viewId)) return;
+
       const data = { loading: false, deepGraph, rgd: { name: rgdName }, namespace, instanceName: name, lastRefresh: new Date().toISOString() };
       view.data = { ...view.data, ...data };
       send({ type: "view.update", viewId, data: view.data });
 
       // 5s watcher: re-fetch liveState for each known CR node (cheap — no recursive expansion)
       const watcherId = setInterval(async () => {
+        // Stop silently if view was closed
+        if (!session.views.has(viewId)) { clearInterval(watcherId); session.watchers.delete(viewId); return; }
         try {
           const updatedNodes = await Promise.all(
             deepGraph.nodes.map(async n => {
@@ -211,6 +236,7 @@ async function handleViewRequest(
       }, 5000);
       session.watchers.set(viewId, watcherId);
     }).catch(e => {
+      if (!session.views.has(viewId)) return;
       const data = { loading: false, error: String(e) };
       view.data = { ...view.data, ...data };
       send({ type: "view.update", viewId, data: view.data });
@@ -224,6 +250,13 @@ async function handleViewRequest(
     const name = payload.name as string;
     if (!rgdName || !namespace || !name) return;
 
+    // Stable viewId — re-opening replaces the old view and its watcher
+    const viewId = `view_live_${namespace}_${name}`.replace(/[^a-z0-9_]/gi, "_");
+
+    // Stop any existing watcher for this target before creating a new one
+    const existingWatcher = session.watchers.get(viewId);
+    if (existingWatcher) { clearInterval(existingWatcher); session.watchers.delete(viewId); }
+
     try {
       // Parallel fetch: RGD list + RGD detail (both likely cached)
       const [rgds, detail] = await Promise.all([
@@ -235,12 +268,12 @@ async function handleViewRequest(
 
       const graph = buildRGDGraph(detail);
 
-      let childKinds: string[] = ["configmaps"];
+      let childKinds: string[] = ["ConfigMap"];
       for (const res of detail.spec.resources ?? []) {
         const tmpl = (res as { template?: Record<string, unknown> }).template;
-        if (typeof tmpl?.kind === "string") childKinds.push(tmpl.kind.toLowerCase() + "s");
+        if (typeof tmpl?.kind === "string") childKinds.push(tmpl.kind);
       }
-      childKinds = [...new Set(childKinds)].filter(k => k !== rgd.kind.toLowerCase() + "s");
+      childKinds = [...new Set(childKinds)].filter(k => k.toLowerCase() !== rgd.kind.toLowerCase());
 
       // Parallel fetch: instance + events + child resources
       const [instance, events, childResources] = await Promise.all([
@@ -252,7 +285,6 @@ async function handleViewRequest(
       const reconciling = detectReconciling(instance);
       const nodeStates = buildNodeLiveStates(instance, childResources, graph, reconciling);
 
-      const viewId = `view_${Math.random().toString(36).slice(2, 10)}`;
       const viewData = {
         instance, events, childResources, graph, nodeStates, reconciling,
         rgd: { name: rgdName, kind: rgd.kind, group: rgd.group },
@@ -265,6 +297,8 @@ async function handleViewRequest(
 
       // 5s watcher — parallel refresh
       const watcherId = setInterval(async () => {
+        // Stop silently if view was closed
+        if (!session.views.has(viewId)) { clearInterval(watcherId); session.watchers.delete(viewId); return; }
         try {
           const [fresh, freshEvents, freshChildren] = await Promise.all([
             getInstance(rgd.kind, rgd.group, namespace, name, context),
@@ -301,10 +335,111 @@ async function handleViewRequest(
   }
 }
 
+// ─── Restart watchers after reconnect ────────────────────────────────────────
+// When the browser disconnects, all watchers are cleared. On reconnect the
+// existing views are re-sent but watchers aren't running. This function
+// restarts them for any live or deep-instance view that lost its watcher.
+
+function restartWatchers(ws: ServerWebSocket<WsData>, session: KrodeSession): void {
+  const context = session.kubectlContext;
+  const cache = session.cache;
+  const send = (msg: Record<string, unknown>) => {
+    try { ws.send(JSON.stringify(msg)); } catch { /* ignore */ }
+  };
+
+  for (const view of session.views.values()) {
+    if (session.watchers.has(view.id)) continue; // already running
+
+    if (view.mode === "instance-graph") {
+      const data = view.data as {
+        rgd?: { kind?: string; group?: string; name?: string };
+        namespace?: string;
+        instanceName?: string;
+        childResources?: unknown[];
+        graph?: unknown;
+      };
+      const rgd = data.rgd;
+      if (!rgd?.kind || !rgd?.group || !data.namespace || !data.instanceName) continue;
+
+      // Re-derive child kinds from cached RGD detail
+      cachedGetRGDDetail(cache, rgd.name ?? "", context).then(async (detail) => {
+        let childKinds: string[] = ["ConfigMap"];
+        for (const res of detail.spec.resources ?? []) {
+          const tmpl = (res as { template?: Record<string, unknown> }).template;
+          if (typeof tmpl?.kind === "string") childKinds.push(tmpl.kind);
+        }
+        childKinds = [...new Set(childKinds)].filter(k => k.toLowerCase() !== rgd.kind!.toLowerCase());
+
+        const watcherId = setInterval(async () => {
+          if (!session.views.has(view.id)) { clearInterval(watcherId); session.watchers.delete(view.id); return; }
+          try {
+            const [fresh, freshEvents, freshChildren] = await Promise.all([
+              getInstance(rgd.kind!, rgd.group!, data.namespace!, data.instanceName!, context),
+              getInstanceEvents(data.namespace!, data.instanceName!, context),
+              getChildResources(data.namespace!, data.instanceName!, childKinds, context),
+            ]);
+            const freshReconciling = detectReconciling(fresh);
+            const cachedGraph = (view.data as Record<string, unknown>).graph as import("@/kro/types").RGDGraph | undefined;
+            const freshStates = cachedGraph ? buildNodeLiveStates(fresh, freshChildren, cachedGraph, freshReconciling) : {};
+            const update = {
+              ...view.data,
+              instance: fresh, events: freshEvents, childResources: freshChildren,
+              nodeStates: freshStates, reconciling: freshReconciling,
+              lastRefresh: new Date().toISOString(),
+            };
+            view.data = update;
+            send({ type: "view.update", viewId: view.id, data: update });
+          } catch { /* ignore watcher errors */ }
+        }, 5000);
+        session.watchers.set(view.id, watcherId);
+      }).catch(() => { /* RGD may have been deleted */ });
+    }
+
+    if (view.mode === "deep-instance") {
+      const data = view.data as { rgd?: { name?: string }; namespace?: string; instanceName?: string };
+      if (!data.rgd?.name || !data.namespace || !data.instanceName) continue;
+
+      const watcherId = setInterval(async () => {
+        if (!session.views.has(view.id)) { clearInterval(watcherId); session.watchers.delete(view.id); return; }
+        try {
+          const rgds = await cachedListRGDs(cache, context);
+          const deepGraph = (view.data as Record<string, unknown>).deepGraph as import("@/kro/types").DeepInstanceGraph | undefined;
+          if (!deepGraph) return;
+          const updatedNodes = await Promise.all(
+            deepGraph.nodes.map(async n => {
+              if (!n.crName || !n.namespace || !n.resourceKind) return n;
+              try {
+                const yaml = await getResourceYaml(n.namespace, n.resourceKind, n.crName, context);
+                if (!yaml) return { ...n, liveState: "not-found" as const };
+                const condMatch = yaml.match(/type:\s*Ready\n\s*status:\s*(True|False)/);
+                const reconcilingMatch = yaml.match(/type:\s*Progressing\n\s*status:\s*True/);
+                let liveState: import("@/kro/types").LiveState = "ok";
+                if (reconcilingMatch) liveState = "reconciling";
+                else if (condMatch?.[1] === "True") liveState = "alive";
+                else if (condMatch?.[1] === "False") liveState = "error";
+                return { ...n, liveState };
+              } catch { return n; }
+            })
+          );
+          const refreshedGraph = { ...deepGraph, nodes: updatedNodes };
+          const update = { ...view.data, deepGraph: refreshedGraph, lastRefresh: new Date().toISOString() };
+          view.data = update;
+          send({ type: "view.update", viewId: view.id, data: update });
+        } catch { /* ignore */ }
+      }, 5000);
+      session.watchers.set(view.id, watcherId);
+    }
+  }
+}
+
 export async function createSessionServer(
   sessionId: SessionId,
   session: KrodeSession,
   configuredPort?: number,
+  hooks?: {
+    onConnected?: (sessionId: SessionId) => void;
+    onDisconnected?: (sessionId: SessionId) => void;
+  },
 ): Promise<{ server: Server<WsData>; port: number }> {
   const server = Bun.serve<WsData>({
     port: configuredPort ?? 0,
@@ -333,6 +468,7 @@ export async function createSessionServer(
     websocket: {
       open(ws: ServerWebSocket<WsData>) {
         session.ws = ws as unknown as WebSocket;
+        hooks?.onConnected?.(sessionId);
         // Send all open views on connect
         for (const view of session.views.values()) {
           ws.send(
@@ -344,12 +480,22 @@ export async function createSessionServer(
         }
         ws.send(JSON.stringify({ type: "ping" }));
 
+        // Restart watchers for any live/deep views that lost their watcher on disconnect
+        restartWatchers(ws, session);
+
         // Kick off background cache warm-up — don't await, fire and forget
         warmCache(session.cache, session.kubectlContext).catch(() => {});
       },
 
       close(_ws: ServerWebSocket<WsData>) {
         session.ws = null;
+        hooks?.onDisconnected?.(sessionId);
+        // Stop all watchers — no consumer to receive updates when disconnected.
+        // They will restart when the browser reconnects and re-opens views.
+        for (const [id, watcher] of session.watchers) {
+          clearInterval(watcher);
+          session.watchers.delete(id);
+        }
       },
 
       message(ws: ServerWebSocket<WsData>, msg: string | Buffer) {

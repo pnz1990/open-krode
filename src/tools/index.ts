@@ -82,7 +82,9 @@ export function makeShowRgdGraphTool(mgr: SessionManager) {
       const detail = await getRGDDetail(rgd_name, context);
       const graph = buildRGDGraph(detail);
 
-      const viewId = mgr.openView(session_id, {
+      // getOrOpenView reuses an existing rgd-graph view for the same target so
+      // calling show_rgd_graph multiple times doesn't accumulate stale views.
+      const viewId = mgr.getOrOpenView(session_id, {
         mode: "rgd-graph",
         target: rgd_name,
         kubectlContext: context,
@@ -286,7 +288,8 @@ export function makeShowEventsTool(mgr: SessionManager) {
 
       const events = await getInstanceEvents(namespace, name, context);
 
-      const viewId = mgr.openView(session_id, {
+      // Reuse existing view for the same target to prevent unbounded view accumulation
+      const viewId = mgr.getOrOpenView(session_id, {
         mode: "instance-events",
         target: `${namespace}/${name}`,
         kubectlContext: context,
@@ -329,7 +332,8 @@ export function makeShowYamlTool(mgr: SessionManager) {
 
       const instance = await getInstance(rgd.kind, rgd.group, namespace, name, context);
 
-      const viewId = mgr.openView(session_id, {
+      // Reuse existing view for the same target to prevent unbounded view accumulation
+      const viewId = mgr.getOrOpenView(session_id, {
         mode: "instance-yaml",
         target: `${namespace}/${name}`,
         kubectlContext: context,

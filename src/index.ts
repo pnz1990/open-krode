@@ -34,7 +34,6 @@ const KrodePlugin: Plugin = async () => {
     config: async (config: Config) => {
       if (!config.agent) config.agent = {};
       config.agent["krode"] = {
-        model: "anthropic/claude-sonnet-4-5",
         prompt: KRODE_AGENT_PROMPT,
         description:
           "kro RGD visualization and live instance observability. Explores ResourceGraphDefinitions (DAG), explains CEL expressions and specPatch nodes, and watches live kro instances.",
