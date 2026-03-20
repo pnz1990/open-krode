@@ -6,7 +6,9 @@
   "types": "dist/index.d.ts",
   "type": "module",
   "files": [
-    "dist"
+    "dist",
+    "README.md",
+    "LICENSE"
   ],
   "exports": {
     ".": {
@@ -16,6 +18,7 @@
   },
   "scripts": {
     "build": "echo \"export const BUILD_TIME = '$(date -u '+%Y-%m-%d %H:%M UTC')';\" > src/build-stamp.ts && bun build src/index.ts --outdir dist --target bun --format esm && tsc --emitDeclarationOnly && bun scripts/write-ui-html.ts && cp small-logo.png dist/logo.png && cp favicon.icon.png dist/favicon.png",
+    "prepublishOnly": "bun run build",
     "install:plugin": "bun run build && mkdir -p ~/.cache/opencode/node_modules/open-krode/dist && cp dist/index.js ~/.cache/opencode/node_modules/open-krode/dist/index.js && cp dist/ui.html ~/.cache/opencode/node_modules/open-krode/dist/ui.html && cp dist/logo.png ~/.cache/opencode/node_modules/open-krode/dist/logo.png && cp dist/favicon.png ~/.cache/opencode/node_modules/open-krode/dist/favicon.png && cp package.json ~/.cache/opencode/node_modules/open-krode/package.json",
     "clean": "rm -rf dist",
     "typecheck": "tsc --noEmit",
@@ -24,15 +27,31 @@
   },
   "keywords": [
     "opencode",
-    "plugin",
+    "opencode-plugin",
     "kro",
     "kubernetes",
     "rgd",
+    "resourcegraphdefinition",
     "dag",
-    "observability"
+    "observability",
+    "k8s"
   ],
   "author": "rrroizma",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pnz1990/open-krode.git"
+  },
+  "homepage": "https://github.com/pnz1990/open-krode#readme",
+  "bugs": {
+    "url": "https://github.com/pnz1990/open-krode/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
     "@opencode-ai/plugin": "^1.0.223"
   },
